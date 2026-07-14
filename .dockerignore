@@ -1,0 +1,58 @@
+# ── Git ──
+.git
+.gitignore
+
+# ── Python ──
+venv/
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+*.egg-info
+
+# ── Node / Electron ──
+node_modules/
+renderer/
+chrome_extension/
+preload.js
+main.js
+package.json
+package-lock.json
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Environment / Secrets ──
+.env
+backend/.env
+*.pem
+*.key
+
+# ── macOS ──
+.DS_Store
+hey_adele.ppn
+
+# ── Build artifacts ──
+dist/
+build/
+out/
+
+# ── Docs / Tests / Benchmarks ──
+docs/
+tests/
+benchmarks/
+experiments/
+*.md
+LICENSE
+
+# ── Deploy scripts (not needed in image) ──
+deploy/
+
+# ── Dockerfile itself ──
+Dockerfile
+.dockerignore

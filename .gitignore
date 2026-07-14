@@ -1,0 +1,30 @@
+node_modules/
+venv/
+.venv/
+.DS_Store
+__pycache__/
+*.log
+hey_adele.ppn
+.env
+
+dist/
+release/
+release-build-verify/
+build/cache/
+*.dmg
+*.dmg.blockmap
+scripts/blog-*.html
+
+# Build artifacts — bundled Python runtime & pre-built wheels
+build/python/
+wheelhouse/
+
+# Installer binaries
+*.exe
+*.blockmap
+landing/public/downloads/
+.moonwalk/
+
+# Reference / local-only folders
+click/
+tiptour/
