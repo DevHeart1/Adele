@@ -1,6 +1,7 @@
 node_modules/
 venv/
 .venv/
+apps/desktop/backend/providers/codex_schemas/
 .DS_Store
 __pycache__/
 *.log

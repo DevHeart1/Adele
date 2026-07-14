@@ -100,6 +100,10 @@ Run ADELE Desktop:
 npm run desktop:start
 ```
 
+### Build Week AI connection
+
+ADELE Desktop uses **ChatGPT sign-in through Codex App Server** and requires **GPT-5.6**. Install Codex first, start Adele, then select **Continue with ChatGPT** in onboarding. Adele never stores a ChatGPT password or token and does not provide a main-LLM API-key field.
+
 Prepare the desktop Python backend:
 
 ```powershell
@@ -123,19 +127,7 @@ npm run desktop:dist:extension
 
 ## Environment
 
-The desktop app reads its environment from the desktop workspace and backend runtime. Common variables include:
-
-```bash
-ADELE_LLM_PROVIDER=gemini
-GEMINI_API_KEY=...
-GEMINI_FAST_MODEL=gemini-3-flash-preview
-
-ADELE_LLM_PROVIDER=ollama
-ADELE_LOCAL_MODEL=gemma3
-ADELE_LOCAL_BASE_URL=http://127.0.0.1:11434/v1
-```
-
-Provider names and model defaults are still being tightened during the monorepo migration.
+The active Desktop LLM connection is ChatGPT through Codex App Server. The only supported developer override is `ADELE_CODEX_EXECUTABLE`, which can point to a local Codex executable. Adele does not read a ChatGPT token, and no provider-selection or main-LLM API-key setting is used.
 
 ## Chrome Extension
 
@@ -211,6 +203,10 @@ The full Windows installer build also needs the prepared Python runtime bundle u
 - [Architecture Notes](docs/architecture/README.md)
 - [Web Plan](docs/web/README.md)
 - [Hackathon Submission Plan](docs/submission/HACKATHON_SUBMISSION.md)
+- [Codex App Server Integration](docs/CODEX_APP_SERVER_INTEGRATION.md)
+- [Build Week Desktop Setup](docs/BUILD_WEEK_DESKTOP_SETUP.md)
+- [Security and Privacy](docs/ADELE_SECURITY_AND_PRIVACY.md)
+- [Build Week Demo](docs/BUILD_WEEK_DEMO.md)
 
 ## License
 

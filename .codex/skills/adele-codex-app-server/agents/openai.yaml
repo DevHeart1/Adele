@@ -1,0 +1,4 @@
+interface:
+  display_name: "Adele Codex App Server"
+  short_description: "Maintain Adele ChatGPT and Codex integration."
+  default_prompt: "Implement or validate Adele Desktop Codex App Server integration."
