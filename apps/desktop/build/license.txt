@@ -1,0 +1,32 @@
+ADELE SOFTWARE LICENSE AGREEMENT
+
+ADELE is a desktop automation assistant by Startrz Technologies.
+
+By installing or using ADELE, you agree to the terms below.
+
+1. License
+   Startrz Technologies grants you a limited, revocable license to install and run ADELE
+   for personal or authorized business use subject to applicable law.
+
+2. Restrictions
+   You may not reverse engineer (except where prohibited by law), resell,
+   sublicense, redistribute, modify, merge, or create derivative works based on ADELE's
+   software without prior written consent from Startrz Technologies except as allowed by
+   the license that governs third-party dependencies included with this product.
+
+3. Third-party services & API keys
+   ADELE may use third-party APIs (such as AI and voice providers) that you configure.
+   Your use of those services is governed solely by those providers’ terms.
+
+4. Disclaimer
+   ADELE IS PROVIDED “AS IS” WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+   AND NONINFRINGEMENT.
+
+5. Termination
+   Startrz Technologies may suspend or terminate license rights where use violates these
+   terms or applicable law.
+
+For volume licensing or enterprise deployments, contact Startrz Technologies.
+
+Copyright © 2026 Startrz Technologies. All rights reserved.
