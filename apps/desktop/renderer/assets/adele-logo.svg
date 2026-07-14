@@ -1,0 +1,33 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="adele-a" x1="79" y1="33" x2="188" y2="218" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B9F6FF"/>
+      <stop offset="0.32" stop-color="#4BB7FF"/>
+      <stop offset="0.68" stop-color="#258BFF"/>
+      <stop offset="1" stop-color="#7D6CFF"/>
+    </linearGradient>
+    <linearGradient id="adele-a-inner" x1="128" y1="61" x2="128" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#E6FBFF"/>
+      <stop offset="0.48" stop-color="#41B8FF"/>
+      <stop offset="1" stop-color="#1B6DFF"/>
+    </linearGradient>
+    <filter id="adele-glow" x="17" y="10" width="222" height="236" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+      <feOffset dy="6"/>
+      <feGaussianBlur stdDeviation="14"/>
+      <feComposite in2="hardAlpha" operator="out"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.05 0 0 0 0 0.49 0 0 0 0 1 0 0 0 0.88 0"/>
+      <feBlend mode="screen" in2="BackgroundImageFix" result="effect1_dropShadow"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="effect1_dropShadow" result="shape"/>
+    </filter>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="transparent"/>
+  <g filter="url(#adele-glow)">
+    <path d="M128 31L221 221H170L153 187H103L86 221H35L128 31ZM121 112L83 188H115L128 160L141 188H173L135 112L128 97L121 112Z" fill="url(#adele-a)" fill-opacity="0.35"/>
+    <path d="M128 38L213 212H174L157 178H99L82 212H43L128 38ZM128 81L92 155H112L128 121L144 155H164L128 81Z" stroke="url(#adele-a-inner)" stroke-width="12" stroke-linejoin="miter"/>
+    <path d="M128 57L199 203H180L162 166H141L154 194H102L115 166H94L76 203H57L128 57ZM128 104L111 141H145L128 104Z" fill="#04182D"/>
+    <path d="M128 57L199 203H180L162 166H141L154 194H102L115 166H94L76 203H57L128 57ZM128 104L111 141H145L128 104Z" stroke="#35A7FF" stroke-width="8" stroke-linejoin="miter"/>
+    <path d="M128 57L199 203H180L162 166H141L154 194H102L115 166H94L76 203H57L128 57Z" stroke="#BFF8FF" stroke-width="3" stroke-linejoin="miter" opacity="0.86"/>
+  </g>
+</svg>

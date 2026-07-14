@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="ADELE — Memory-aware desktop companion" />
+  <title>ADELE — Memory-aware desktop companion</title>
+  <link rel="icon" type="image/png" href="./assets/favicon.png" />
+  <link rel="apple-touch-icon" href="./assets/icon.png" />
+  <link rel="stylesheet" href="../node_modules/katex/dist/katex.min.css" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+<div class="stage">
+
+    <div class="automation-lock hidden" id="automation-lock" aria-hidden="true">
+      <div class="automation-lock-edge automation-lock-edge-top"></div>
+      <div class="automation-lock-edge automation-lock-edge-right"></div>
+      <div class="automation-lock-edge automation-lock-edge-bottom"></div>
+      <div class="automation-lock-edge automation-lock-edge-left"></div>
+      <div class="automation-lock-label" id="automation-lock-label">ADELE is controlling the screen</div>
+    </div>
+
+    <div id="glow" class="ambient-glow"></div>
+
+    <div class="adele-cursor hidden" id="adele-cursor" aria-hidden="true">
+      <div class="adele-cursor-target" id="adele-cursor-target">
+        <span class="adele-cursor-target-ring"></span>
+        <span class="adele-cursor-target-ring"></span>
+        <span class="adele-cursor-target-cross"></span>
+      </div>
+      <div class="adele-cursor-trail" id="adele-cursor-trail"></div>
+      <div class="adele-cursor-mark">
+        <svg class="adele-cursor-glyph adele-cursor-glyph-pointer" viewBox="0 0 24 24">
+          <path d="M4.04 4.69a.92.92 0 0 1 .65-.65l16 6.5a.92.92 0 0 1-.06.95l-6.13 1.58a2.02 2.02 0 0 0-1.44 1.43l-1.58 6.13a.92.92 0 0 1-.94.06L4.04 4.69Z" />
+        </svg>
+        <div class="adele-cursor-glyph adele-cursor-glyph-wave" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+        <div class="adele-cursor-glyph adele-cursor-glyph-spinner" aria-hidden="true"></div>
+      </div>
+      <div class="adele-cursor-label" id="adele-cursor-label">ADELE</div>
+      <div class="adele-cursor-bubble" id="adele-cursor-bubble">
+        <div class="adele-cursor-bubble-head">
+          <span class="adele-cursor-bubble-dot"></span>
+          <span class="adele-cursor-bubble-title" id="adele-cursor-bubble-title">Pointing here</span>
+        </div>
+        <div class="adele-cursor-bubble-meta" id="adele-cursor-bubble-meta">Waiting for target</div>
+        <div class="adele-cursor-bubble-trace hidden" id="adele-cursor-bubble-trace"></div>
+      </div>
+    </div>
+
+    <header class="app-titlebar" id="app-titlebar" aria-label="ADELE window title bar">
+      <div class="app-titlebar-brand" aria-label="ADELE">
+        <span class="app-titlebar-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24">
+            <path d="M10 2c1.5 3.5 3.4 5.4 7 7l-2.1 5c-3.5-1.5-5.4-3.4-7-7L10 2Z" />
+            <path d="M7.8 8c3.5 1.5 5.4 3.4 7 7L10 17c-1.5-3.5-3.4-5.4-7-7l4.8-2Z" />
+          </svg>
+        </span>
+        <span class="app-titlebar-name">ADELE</span>
+      </div>
+      <div class="app-titlebar-drag" aria-hidden="true"></div>
+      <div class="app-window-controls" id="app-window-controls" role="toolbar" aria-label="Window controls">
+        <button type="button" class="app-window-btn app-window-minimize" id="app-window-minimize" aria-label="Minimize window" title="Minimize">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <line x1="2.2" y1="7.6" x2="9.8" y2="7.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button type="button" class="app-window-btn app-window-maximize" id="app-window-maximize" aria-label="Maximize window" title="Maximize">
+          <svg class="window-icon-maximize" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <rect x="2.4" y="2.4" width="7.2" height="7.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.3" />
+          </svg>
+          <svg class="window-icon-restore hidden" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <rect x="2" y="3.8" width="6.2" height="6.2" rx="1.1" fill="none" stroke="currentColor" stroke-width="1.2" />
+            <path d="M4.1 3.8V2h5.8v5.8H8.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <button type="button" class="app-window-btn app-window-close" id="app-window-close" aria-label="Close app" title="Close">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="glass-pill state-idle" id="ui-wrapper">
+
+      <!-- Idle -->
+      <div class="content-wrapper active" id="ui-idle">
+        <svg class="mic-icon" viewBox="0 0 24 24">
+          <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+          <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+        </svg>
+        <span class="status-text" id="status-text">Hey ADELE</span>
+      </div>
+
+      <!-- Listening (with typewriter) -->
+      <div class="content-wrapper" id="ui-listening">
+        <svg class="mic-icon" style="fill: #86868b;" viewBox="0 0 24 24">
+          <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+          <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
+        </svg>
+        <span class="status-text" id="typewriter-text"></span><span class="cursor" id="typewriter-cursor"></span>
+      </div>
+
+      <!-- Loading (Thinking) -->
+      <div class="content-wrapper" id="ui-loading" style="width: 100%; justify-content: center; transform: none; left: 0;">
+        <div class="bouncing-balls">
+          <div class="ball"></div>
+          <div class="ball"></div>
+          <div class="ball"></div>
+        </div>
+      </div>
+
+      <!-- Doing (Action in progress) -->
+      <div class="content-wrapper" id="ui-doing">
+        <div class="spinner"></div>
+        <img src="" alt="App Icon" class="app-icon" id="app-icon" />
+        <span class="status-text" id="doing-text">Processing...</span>
+      </div>
+
+      <!-- Stop / Cancel button (visible during DOING & LOADING) -->
+      <button class="pill-stop-btn hidden" id="pill-stop" aria-label="Stop task">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+      </button>
+
+    </div>
+
+    <!-- Response Card (conversational answers — appears below pill) -->
+    <div class="response-card hidden" id="ui-response">
+      <button class="response-dismiss" id="response-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="response-body">
+        <span class="response-text" id="response-text"></span><span class="response-cursor"
+          id="response-cursor">▌</span>
+      </div>
+    </div>
+
+    <!-- ═══ MODAL: Rich (long-form content) ═══ -->
+    <div class="modal-rich hidden" id="modal-rich">
+      <button class="response-dismiss" id="rich-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-rich-title" id="rich-title"></div>
+      <div class="modal-rich-body" id="rich-body"></div>
+    </div>
+
+    <!-- ═══ MODAL: Table (structured data) ═══ -->
+    <div class="modal-table hidden" id="modal-table">
+      <button class="response-dismiss" id="table-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-table-title" id="table-title"></div>
+      <div class="modal-table-wrap">
+        <table class="modal-table-el" id="table-el">
+          <thead id="table-head"></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+      <div class="modal-table-footer" id="table-footer"></div>
+    </div>
+
+    <!-- ═══ MODAL: List (items / search results) ═══ -->
+    <div class="modal-list hidden" id="modal-list">
+      <button class="response-dismiss" id="list-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-list-title" id="list-title"></div>
+      <div class="modal-list-message" id="list-message"></div>
+      <div class="modal-list-items" id="list-items"></div>
+    </div>
+
+    <!-- ═══ MODAL: Confirm (action buttons) ═══ -->
+    <div class="modal-confirm hidden" id="modal-confirm">
+      <button class="response-dismiss" id="confirm-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-confirm-body" id="confirm-body"></div>
+      <div class="modal-confirm-actions" id="confirm-actions"></div>
+    </div>
+
+    <!-- ═══ MODAL: Media (image viewer) ═══ -->
+    <div class="modal-media hidden" id="modal-media">
+      <button class="response-dismiss" id="media-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-media-message" id="media-message"></div>
+      <img class="modal-media-img" id="media-img" alt="" />
+      <div class="modal-media-caption" id="media-caption"></div>
+    </div>
+
+    <!-- ═══ MODAL: Steps (progress timeline / plan preview) ═══ -->
+    <div class="modal-steps hidden" id="modal-steps">
+      <button class="response-dismiss" id="steps-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-steps-title" id="steps-title"></div>
+      <div class="modal-steps-subtitle" id="steps-subtitle"></div>
+      <div class="modal-steps-message" id="steps-message"></div>
+      <div class="modal-steps-timeline" id="steps-timeline"></div>
+      <div class="modal-steps-actions hidden" id="steps-actions"></div>
+    </div>
+
+    <!-- ═══ MODAL: Cards (image + text cards) ═══ -->
+    <div class="modal-products hidden" id="modal-products">
+      <button class="response-dismiss" id="products-dismiss" aria-label="Dismiss">
+        <svg width="10" height="10" viewBox="0 0 10 10">
+          <path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+        </svg>
+      </button>
+      <div class="modal-products-header" id="products-header">
+        <div class="modal-products-header-text">
+          <div class="modal-products-title" id="products-title"></div>
+          <div class="modal-products-subtitle" id="products-subtitle"></div>
+        </div>
+      </div>
+      <div class="modal-products-message" id="products-message"></div>
+      <div class="modal-products-body" id="products-body">
+        <div class="modal-products-grid" id="products-grid"></div>
+        <div class="modal-products-sidebar hidden" id="products-sidebar"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Command Panel (shortcut-driven text prompting) ═══ -->
+    <!-- ═══ Command Panel (shortcut-driven text prompting) ═══ -->
+    <div class="command-panel hidden" id="command-panel">
+      <textarea
+        id="command-input"
+        class="command-input"
+        placeholder="Type a request..."
+        rows="1"></textarea>
+      <button class="command-panel-send" id="command-panel-send" aria-label="Run command">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+      </button>
+    </div>
+
+    <!-- ═══ Onboarding Modal (first-launch setup) ═══ -->
+    <div class="onboarding-overlay hidden" id="onboarding-overlay">
+      <div class="onboarding-boot" id="onboarding-boot" role="status" aria-live="polite">
+        <div class="onboarding-boot-mark" aria-hidden="true">
+          <svg viewBox="0 0 64 64">
+            <path d="M27 5c3.7 8.5 8.3 13.1 16.7 16.7l-4.8 11.6c-8.5-3.7-13.1-8.3-16.7-16.7L27 5Z" />
+            <path d="M21.8 21.3c8.5 3.7 13.1 8.3 16.7 16.7L27 43c-3.7-8.5-8.3-13.1-16.7-16.7l11.5-5Z" />
+          </svg>
+        </div>
+        <h1 class="onboarding-boot-title">Your Agent is Loading...</h1>
+        <p class="onboarding-boot-subtitle">First launch may take up to 5 minutes. Please wait.</p>
+        <p class="onboarding-boot-version" id="onboarding-boot-version">Version 1.0.0</p>
+      </div>
+
+      <div class="onboarding-card hidden" id="onboarding-card">
+        <button type="button" class="onboarding-back-btn hidden" id="onboarding-back" aria-label="Go back">
+          <span aria-hidden="true">&lsaquo;</span>
+          <span>Back</span>
+        </button>
+        <div class="onboarding-header">
+          <svg class="onboarding-logo" viewBox="0 0 40 40" width="44" height="44">
+            <defs>
+              <linearGradient id="ob-grad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#4285F4"/>
+                <stop offset="100%" stop-color="#A855F7"/>
+              </linearGradient>
+            </defs>
+            <circle cx="20" cy="20" r="19" fill="url(#ob-grad)" opacity="0.10"/>
+            <path d="M24 10a12 12 0 01-1.5 20.8A10 10 0 0024 10z" fill="url(#ob-grad)" opacity="0.85"/>
+          </svg>
+          <h2 class="onboarding-title"></h2>
+          <p class="onboarding-expanded-name">Your memory-aware desktop companion.</p>
+          <p class="onboarding-subtitle onboarding-tagline">Your AI desktop assistant</p>
+          <div class="onboarding-header-rule" aria-hidden="true"></div>
+        </div>
+
+        <div class="onboarding-progress-pill" id="onboarding-progress-pill" aria-label="Onboarding progress">
+          <span class="onboarding-progress-dot active" data-onboarding-progress="0"></span>
+          <span class="onboarding-progress-dot" data-onboarding-progress="1"></span>
+          <span class="onboarding-progress-dot" data-onboarding-progress="2"></span>
+          <span class="onboarding-progress-dot" data-onboarding-progress="3"></span>
+          <span class="onboarding-progress-dot" data-onboarding-progress="4"></span>
+        </div>
+
+        <!-- Step 1: Welcome -->
+        <div class="onboarding-step active" id="onboarding-step-0">
+          <div class="onboarding-welcome-menu">
+            <div class="onboarding-welcome-mark" aria-hidden="true">
+              <svg viewBox="0 0 64 64">
+                <path d="M27 5c3.7 8.5 8.3 13.1 16.7 16.7l-4.8 11.6c-8.5-3.7-13.1-8.3-16.7-16.7L27 5Z" />
+                <path d="M21.8 21.3c8.5 3.7 13.1 8.3 16.7 16.7L27 43c-3.7-8.5-8.3-13.1-16.7-16.7l11.5-5Z" />
+              </svg>
+            </div>
+            <h3 class="onboarding-welcome-title">Welcome to ADELE</h3>
+            <p class="onboarding-welcome-meaning">Your memory-aware desktop companion.</p>
+            <button type="button" class="onboarding-welcome-primary" id="onboarding-start">Get Started</button>
+            <p class="onboarding-welcome-terms">By clicking the button, you agree to our <a href="#" class="onboarding-inline-link">Terms of Use</a>.</p>
+          </div>
+        </div>
+
+        <!-- Step 1: API Key -->
+        <div class="onboarding-step" id="onboarding-step-1">
+          <div class="onboarding-step-kicker">Step 1 of 5</div>
+          <h3 class="onboarding-step-title">Enter Google (Gemini) API Key</h3>
+          <div class="onboarding-body">
+            <p class="onboarding-intro">Get your key free at Google AI Studio — no credit card needed.</p>
+            <div class="onboarding-apikey-box">
+              <a href="https://aistudio.google.com/app/apikey" id="onboarding-open-aistudio" class="onboarding-link">Get free key at aistudio.google.com →</a>
+              <div class="onboarding-input-row">
+                <span class="onboarding-input-prefix" aria-hidden="true">
+                  <svg class="onboarding-row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+                </span>
+                <input type="password" id="onboarding-gemini-key" class="onboarding-input onboarding-input-inset"
+                       placeholder="Paste your Gemini API key" autocomplete="off" spellcheck="false" />
+                <button type="button" class="onboarding-input-suffix" id="onboarding-gemini-toggle" aria-label="Show API key" aria-pressed="false" tabindex="0">
+                  <svg class="onboarding-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="onboarding-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-0">
+            <span class="onboarding-btn-label">Continue</span>
+            <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <!-- Step 3: Connect MongoDB Memory -->
+        <div class="onboarding-step" id="onboarding-step-2">
+          <div class="onboarding-step-kicker">Step 2 of 5</div>
+          <h3 class="onboarding-step-title">Connect MongoDB Memory</h3>
+          <div class="onboarding-body">
+            <p class="onboarding-step-intro">ADELE stores context, conversation history, and long-term memory in a MongoDB database.</p>
+            <div class="onboarding-apikey-box" style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+              <div class="onboarding-input-row onboarding-input-row-secondary">
+                <span class="onboarding-input-prefix" aria-hidden="true">
+                  <svg class="onboarding-row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                </span>
+                <input type="password" id="onboarding-mongodb-uri" class="onboarding-input onboarding-input-inset onboarding-input-secondary"
+                       placeholder="MongoDB Connection URI (e.g., mongodb://localhost:27017)" autocomplete="off" spellcheck="false" />
+                <button type="button" class="onboarding-input-suffix" id="onboarding-mongodb-toggle" aria-label="Show MongoDB URI" aria-pressed="false">
+                  <svg class="onboarding-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="onboarding-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                </button>
+              </div>
+
+              <div class="onboarding-input-row onboarding-input-row-secondary">
+                <span class="onboarding-input-prefix" aria-hidden="true">
+                  <svg class="onboarding-row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 22V4c0-.5.2-1 .6-1.4C5 2.2 5.5 2 6 2h12c.5 0 1 .2 1.4.6.4.4.6.9.6 1.4v18l-7-4-7 4z"/></svg>
+                </span>
+                <input type="text" id="onboarding-mongodb-db" class="onboarding-input onboarding-input-inset onboarding-input-secondary"
+                       placeholder="Database Name (e.g., adele)" value="adele" autocomplete="off" spellcheck="false" style="padding-right: 12px;" />
+              </div>
+
+              <div style="display: flex; gap: 12px; margin-top: 8px;">
+                <button type="button" class="onboarding-btn secondary" id="onboarding-mongodb-test" style="flex: 1; margin: 0; padding: 10px;">
+                  <span>Test Connection</span>
+                </button>
+                <button type="button" class="onboarding-btn secondary" id="onboarding-mongodb-create" style="flex: 1; margin: 0; padding: 10px;" disabled>
+                  <span>Create Collections</span>
+                </button>
+              </div>
+              <p class="onboarding-field-status" id="onboarding-mongodb-status" role="status" aria-live="polite" style="margin-top: 4px; font-size: 12px; text-align: center; color: #86868b; min-height: 18px;"></p>
+
+              <details class="onboarding-mongodb-help" id="onboarding-mongodb-help">
+                <summary>MongoDB setup &amp; troubleshooting</summary>
+                <div class="onboarding-mongodb-help-body">
+                  <p class="onboarding-mongodb-help-lead">Use a free <a href="https://www.mongodb.com/cloud/atlas/register" class="onboarding-inline-link" target="_blank" rel="noopener">MongoDB Atlas</a> cluster or a local server at <code>mongodb://localhost:27017</code>.</p>
+                  <ol class="onboarding-mongodb-help-list">
+                    <li>In Atlas: <strong>Clusters</strong> → <strong>Connect</strong> → <strong>Drivers</strong> → copy the connection string.</li>
+                    <li>Replace <code>&lt;db_password&gt;</code> with your database user password.</li>
+                    <li>Add <code>/adele</code> before the <code>?</code> in the URI (or keep database name <strong>adele</strong> below).</li>
+                    <li>In Atlas: <strong>Network Access</strong> → <strong>Add IP Address</strong> → add your current IP (or allow anywhere for dev).</li>
+                    <li>Click <strong>Create Collections</strong> after a successful test. The first run can take up to a minute.</li>
+                  </ol>
+                  <p class="onboarding-mongodb-help-subtitle">If the test times out</p>
+                  <p class="onboarding-mongodb-help-text">Some routers and mobile hotspots cannot resolve <code>mongodb+srv://</code> URLs. Fix DNS, then test again:</p>
+                  <pre class="onboarding-mongodb-help-code" id="onboarding-mongodb-dns-cmd">Set-DnsClientServerAddress -InterfaceAlias "WiFi" -ServerAddresses ("8.8.8.8","1.1.1.1")
+ipconfig /flushdns
+nslookup your-cluster.mongodb.net</pre>
+                  <p class="onboarding-mongodb-help-note">Run in <strong>PowerShell as Administrator</strong>. Replace <code>WiFi</code> with your adapter name if needed (<code>Get-NetAdapter</code>). If DNS still fails, use Atlas <strong>Connect</strong> and choose a standard <code>mongodb://</code> URI instead of <code>mongodb+srv://</code>.</p>
+                </div>
+              </details>
+            </div>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-wake">
+            <span class="onboarding-btn-label">Continue</span>
+            <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <!-- Step 4: ElevenLabs Key -->
+        <div class="onboarding-step" id="onboarding-step-3">
+          <div class="onboarding-step-kicker">Step 3 of 5</div>
+          <h3 class="onboarding-step-title">Voice replies</h3>
+          <div class="onboarding-body">
+            <p class="onboarding-step-intro">Connect ElevenLabs so ADELE can speak back with the voice you choose next.</p>
+            <div class="onboarding-apikey-box">
+              <div class="onboarding-elevenlabs">
+                <div class="onboarding-elevenlabs-head">
+                  <span class="onboarding-elevenlabs-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M2 10v3M6 7v9M10 5v14M14 8v8M18 6v12M22 9v6"/></svg>
+                  </span>
+                  <span class="onboarding-elevenlabs-title">ElevenLabs</span>
+                  <a href="https://elevenlabs.io/app/settings/api-keys" class="onboarding-inline-link onboarding-elevenlabs-link" id="onboarding-open-elevenlabs">elevenlabs.io →</a>
+                </div>
+                <p class="onboarding-elevenlabs-hint">Paste your API key. ADELE will fetch your available voices on the next page.</p>
+                <input type="password" id="onboarding-elevenlabs-key" class="onboarding-input onboarding-input-secondary"
+                       placeholder="ElevenLabs API key" autocomplete="off" spellcheck="false" />
+                <p class="onboarding-field-status" id="onboarding-elevenlabs-status" role="status" aria-live="polite"></p>
+              </div>
+            </div>
+          </div>
+          <div id="onboarding-win-callout-step1" class="onboarding-win-callout hidden" role="note">
+            <p class="onboarding-win-callout-title">Windows Requirement</p>
+            <p class="onboarding-win-callout-text">ADELE includes <strong>Python 3.12</strong> on Windows. If the bundled runtime is missing, install <a href="https://www.python.org/downloads/windows/" class="onboarding-inline-link" id="onboarding-python-download-link">Python 3.10-3.13</a> with <strong>Add python.exe to PATH</strong> enabled.</p>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-voice">
+            <span class="onboarding-btn-label">Continue</span>
+            <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <!-- Step 5: Voice Selection -->
+        <div class="onboarding-step" id="onboarding-step-voice-select">
+          <div class="onboarding-step-kicker">Step 4 of 5</div>
+          <h3 class="onboarding-step-title">Choose a voice</h3>
+          <div class="onboarding-body">
+            <p class="onboarding-step-intro">Pick the ElevenLabs voice ADELE should use for spoken replies.</p>
+            <div class="onboarding-voice-picker" id="onboarding-voice-picker">
+              <div class="onboarding-voice-list" id="onboarding-voice-list" role="radiogroup" aria-label="ElevenLabs voices"></div>
+              <p class="onboarding-field-status" id="onboarding-voice-status" role="status" aria-live="polite">Enter your ElevenLabs key first.</p>
+            </div>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-voice-select" disabled>
+            <span class="onboarding-btn-label">Save &amp; Continue</span>
+            <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <!-- Step 6: Setup Checklist -->
+        <div class="onboarding-step" id="onboarding-step-4">
+          <div class="onboarding-step-kicker">Step 5 of 5</div>
+          <h3 class="onboarding-step-title">Preparing ADELE</h3>
+          <div class="onboarding-body">
+            <p class="onboarding-step-intro">Setting up ADELE — takes about 60 seconds the first time while Python dependencies install.</p>
+            <div id="onboarding-win-callout-step2" class="onboarding-win-callout hidden" role="note">
+              <p class="onboarding-win-callout-title">Windows Requirement</p>
+              <p class="onboarding-win-callout-text">ADELE includes <strong>Python 3.12</strong> on Windows. If the bundled runtime is missing, install <a href="https://www.python.org/downloads/windows/" class="onboarding-inline-link" id="onboarding-python-download-link-2">Python 3.10-3.13</a> on your PATH.</p>
+            </div>
+            <div class="onboarding-checklist">
+              <div class="check-item" id="check-python">
+                <span class="check-icon" aria-hidden="true">⏳</span>
+                <span class="check-label">Python environment</span>
+              </div>
+              <div class="check-item" id="check-ws">
+                <span class="check-icon" aria-hidden="true">⏳</span>
+                <span class="check-label">WebSocket connection</span>
+              </div>
+              <div class="check-item" id="check-mic">
+                <span class="check-icon" aria-hidden="true">⏳</span>
+                <span class="check-label">Microphone access</span>
+              </div>
+              <div class="check-item" id="check-mongodb">
+                <span class="check-icon" aria-hidden="true">⏳</span>
+                <span class="check-label">MongoDB memory</span>
+              </div>
+            </div>
+            <div class="onboarding-log-panel" id="onboarding-log-panel">
+              <button type="button" class="onboarding-log-toggle" id="onboarding-log-toggle" aria-expanded="false" aria-controls="onboarding-setup-log">
+                <svg class="onboarding-log-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+                <span>more</span>
+              </button>
+              <div class="onboarding-setup-log-shell" id="onboarding-setup-log-shell">
+                <div class="onboarding-setup-log" id="onboarding-setup-log" role="log" aria-live="polite"></div>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-2" disabled>
+            <span class="onboarding-btn-label">Continue</span>
+            <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18l6-6-6-6"/></svg>
+          </button>
+        </div>
+
+        <!-- Step 7: Shortcuts & Extension -->
+        <div class="onboarding-step" id="onboarding-step-5">
+          <div class="onboarding-step-kicker">Setup Complete</div>
+          <h3 class="onboarding-step-title">Finish setup</h3>
+          <div class="onboarding-body" style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; width: 100%; text-align: left;">
+            <!-- Column 1: Shortcuts & Chrome Extension -->
+            <div class="onboarding-info-column" style="display: flex; flex-direction: column; gap: 12px;">
+              <div class="shortcut-row">
+                <kbd>⌘</kbd><kbd>⇧</kbd><kbd>Space</kbd>
+                <span class="shortcut-label">Open ADELE</span>
+              </div>
+              <div class="shortcut-row">
+                <kbd>⌥</kbd><kbd>Space</kbd>
+                <span class="shortcut-label">Quick command</span>
+              </div>
+              <div class="shortcut-row">
+                <kbd>Hold</kbd><kbd>Alt</kbd>
+                <span class="shortcut-label">Push-to-talk (Scribe)</span>
+              </div>
+              <div class="shortcut-row">
+                <kbd>Esc</kbd>
+                <span class="shortcut-label">Dismiss</span>
+              </div>
+
+              <div class="onboarding-extension-box" style="margin-top: 8px;">
+                <div class="onboarding-ext-head">
+                  <span class="onboarding-ext-icon" aria-hidden="true">🧩</span>
+                  <div class="onboarding-ext-head-copy">
+                    <h3 class="onboarding-ext-title">Chrome Extension</h3>
+                    <p class="onboarding-ext-desc">Install the Browser Bridge to let ADELE search the web...</p>
+                  </div>
+                </div>
+                <div class="onboarding-ext-actions">
+                  <button type="button" class="onboarding-ext-btn onboarding-ext-btn-primary onboarding-btn-gradient" id="onboarding-export-ext">
+                    <span class="onboarding-ext-btn-ico" aria-hidden="true">📥</span>
+                    <span class="onboarding-ext-btn-label">Save Extension to Downloads</span>
+                  </button>
+                  <button type="button" class="onboarding-ext-btn onboarding-ext-btn-secondary" id="onboarding-reveal-ext">
+                    <span class="onboarding-ext-btn-ico" aria-hidden="true">📂</span>
+                    <span class="onboarding-ext-btn-label">Show Extension Folder</span>
+                  </button>
+                </div>
+                <p class="onboarding-ext-steps" style="font-size: 11px; margin-top: 8px; color: #86868b; line-height: 1.4;">
+                  After saving: Open Chrome <span class="onboarding-ext-arrow" aria-hidden="true">→</span> <code>chrome://extensions</code> <span class="onboarding-ext-arrow" aria-hidden="true">→</span> Enable Developer Mode <span class="onboarding-ext-arrow" aria-hidden="true">→</span> Load unpacked <span class="onboarding-ext-arrow" aria-hidden="true">→</span> Select the saved folder
+                </p>
+              </div>
+            </div>
+
+            <!-- Column 2: Memory Rules, Default Mode, Global Shortcut, Test Adele -->
+            <div class="onboarding-settings-column" style="display: flex; flex-direction: column; gap: 16px;">
+              <!-- Default Mode -->
+              <div>
+                <h4 style="color: #ffffff; font-size: 13px; font-weight: 600; margin-bottom: 6px;">Default Mode</h4>
+                <div class="mode-toggles" style="display: flex; gap: 8px;">
+                  <button type="button" class="onboarding-btn secondary active" id="onboarding-mode-guide" style="flex: 1; padding: 6px 10px; font-size: 12px; margin: 0; background: rgba(0, 122, 255, 0.15); border-color: #007aff;">Guide Mode</button>
+                  <button type="button" class="onboarding-btn secondary" id="onboarding-mode-assist" style="flex: 1; padding: 6px 10px; font-size: 12px; margin: 0;">Assist Mode</button>
+                </div>
+              </div>
+
+              <!-- Memory Rules -->
+              <div>
+                <h4 style="color: #ffffff; font-size: 13px; font-weight: 600; margin-bottom: 6px;">Memory Rules</h4>
+                <label style="display: flex; align-items: center; gap: 8px; color: #f7f7f2; font-size: 12px; margin-bottom: 6px; cursor: pointer;">
+                  <input type="checkbox" id="onboarding-rule-approve" checked style="cursor: pointer;" />
+                  <span>Require approval before saving memories</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; color: #f7f7f2; font-size: 12px; margin-bottom: 6px; cursor: pointer;">
+                  <input type="checkbox" id="onboarding-rule-noscreenshot" checked style="cursor: pointer;" />
+                  <span>Do not store raw screenshots</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; color: #f7f7f2; font-size: 12px; margin-bottom: 6px; cursor: pointer;">
+                  <input type="checkbox" id="onboarding-rule-summaries" checked style="cursor: pointer;" />
+                  <span>Save only summaries (not raw screen dumps)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; color: #f7f7f2; font-size: 12px; cursor: pointer;">
+                  <input type="checkbox" id="onboarding-rule-sensitive" checked style="cursor: pointer;" />
+                  <span>Disable memory for sensitive apps</span>
+                </label>
+              </div>
+
+              <!-- Global Shortcut -->
+              <div>
+                <h4 style="color: #ffffff; font-size: 13px; font-weight: 600; margin-bottom: 6px;">Global Shortcut</h4>
+                <select id="onboarding-shortcut-select" class="onboarding-input onboarding-input-secondary onboarding-select">
+                  <option value="CommandOrControl+Shift+Space" selected>Ctrl + Shift + Space</option>
+                  <option value="CommandOrControl+Space">Ctrl + Space</option>
+                  <option value="Alt+Space">Alt + Space</option>
+                  <option value="CommandOrControl+Shift+A">Ctrl + Shift + A</option>
+                </select>
+              </div>
+
+              <!-- Verification Test -->
+              <div class="onboarding-test-card" style="background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: #ffffff; font-size: 12px; font-weight: 600;">Verification Test</span>
+                  <span id="onboarding-test-status" style="font-size: 11px; color: #86868b;">Not verified</span>
+                </div>
+                <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-test-btn" style="margin-top: 8px; width: 100%; padding: 8px; font-size: 12px; height: 32px;">
+                  <span>Ask: "What am I looking at?"</span>
+                </button>
+                <div id="onboarding-test-response-box" class="hidden" style="margin-top: 8px;">
+                  <p id="onboarding-test-response-text" style="color: #f7f7f2; font-size: 11.5px; white-space: pre-wrap; word-break: break-word; max-height: 80px; overflow-y: auto; margin: 0; line-height: 1.4;"></p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-done" style="margin-top: 16px;">
+            <span class="onboarding-btn-label">Get Started</span>
+          </button>
+        </div>
+
+        <div class="onboarding-version" id="onboarding-version"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Settings (API keys) ═══ -->
+    <div class="settings-overlay hidden" id="settings-overlay">
+      <div class="onboarding-card settings-card">
+        <div class="settings-scroll-body">
+          <div class="onboarding-header settings-card-header">
+            <div class="onboarding-welcome-mark settings-mark" aria-hidden="true">
+              <svg viewBox="0 0 64 64">
+                <path d="M27 5c3.7 8.5 8.3 13.1 16.7 16.7l-4.8 11.6c-8.5-3.7-13.1-8.3-16.7-16.7L27 5Z" />
+                <path d="M21.8 21.3c8.5 3.7 13.1 8.3 16.7 16.7L27 43c-3.7-8.5-8.3-13.1-16.7-16.7l11.5-5Z" />
+              </svg>
+            </div>
+            <h2 class="onboarding-title settings-title">ADELE</h2>
+            <p class="onboarding-expanded-name settings-expanded-name">Your memory-aware desktop companion.</p>
+            <p class="onboarding-subtitle settings-subtitle">Control Intelligence Assistant for Real-time Automation</p>
+            <div class="onboarding-header-rule" aria-hidden="true"></div>
+          </div>
+
+          <section class="settings-section settings-diagnostics-section">
+            <p class="settings-section-kicker">Setup &amp; diagnostics</p>
+            <p class="settings-hint">Re-run the setup wizard to walk through connections, permissions, memory rules, and verification tests again.</p>
+            <button type="button" class="onboarding-btn secondary" id="settings-reopen-wizard">Re-run setup wizard</button>
+          </section>
+
+          <div class="settings-app-info">
+            <div class="settings-app-info-row">
+              <span class="settings-app-info-label">Version</span>
+              <span class="settings-app-info-value" id="settings-app-version">—</span>
+            </div>
+            <div class="settings-app-info-row">
+              <span class="settings-app-info-label">Model</span>
+              <span class="settings-app-info-value" id="settings-gemini-model">—</span>
+            </div>
+            <div class="settings-app-info-row">
+              <span class="settings-app-info-label">Provider</span>
+              <span class="settings-app-info-value">Gemini API (cloud)</span>
+            </div>
+            <div class="settings-app-info-row settings-app-info-row-path">
+              <span class="settings-app-info-label">Data directory</span>
+              <code class="settings-app-info-value settings-app-info-path" id="settings-data-dir">—</code>
+            </div>
+          </div>
+          <section class="settings-section">
+            <p class="settings-section-kicker">Gemini</p>
+            <p class="settings-hint">Gemini is ADELE's reasoning layer. It understands your request, screen context, and tools with adaptive thinking depth. Get your key free at <a href="https://aistudio.google.com/app/apikey" id="settings-link-aistudio" class="onboarding-inline-link">Google AI Studio</a>.</p>
+            <label class="settings-label" for="settings-gemini-key">Gemini API key</label>
+            <input type="password" id="settings-gemini-key" class="onboarding-input" autocomplete="off" spellcheck="false" />
+            <div class="settings-connection-row">
+              <span id="settings-gemini-status-pill" class="settings-status-pill" data-state="idle">Not connected</span>
+              <button type="button" class="onboarding-btn secondary" id="settings-gemini-test">Test Connection</button>
+            </div>
+            <p class="onboarding-field-status" id="settings-gemini-status" role="status" aria-live="polite"></p>
+            <p class="settings-hint subtle">Model: <strong>gemini-3-flash-preview</strong> (fixed)</p>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">MongoDB memory</p>
+            <p class="settings-hint">Memory is what makes ADELE personal. ADELE saves useful summaries, workflows, mistakes, and project context only under the rules you choose.</p>
+            <label class="settings-label" for="settings-mongodb-uri">Connection URI</label>
+            <div class="onboarding-input-row onboarding-input-row-secondary">
+              <span class="onboarding-input-prefix" aria-hidden="true">
+                <svg class="onboarding-row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              </span>
+              <input type="password" id="settings-mongodb-uri" class="onboarding-input onboarding-input-inset onboarding-input-secondary"
+                     placeholder="mongodb://localhost:27017 or mongodb+srv://..." autocomplete="off" spellcheck="false" />
+              <button type="button" class="onboarding-input-suffix" id="settings-mongodb-toggle" aria-label="Show MongoDB URI" aria-pressed="false">
+                <svg class="onboarding-eye-open" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="onboarding-eye-closed hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+            <label class="settings-label" for="settings-mongodb-db">Database name</label>
+            <input type="text" id="settings-mongodb-db" class="onboarding-input onboarding-input-secondary"
+                   placeholder="adele" value="adele" autocomplete="off" spellcheck="false" />
+            <div class="settings-mongodb-actions">
+              <button type="button" class="onboarding-btn secondary" id="settings-mongodb-test">Test Connection</button>
+              <button type="button" class="onboarding-btn secondary" id="settings-mongodb-create" disabled>Create Collections</button>
+            </div>
+            <p class="onboarding-field-status" id="settings-mongodb-status" role="status" aria-live="polite"></p>
+            <details class="onboarding-mongodb-help" id="settings-mongodb-help">
+              <summary>MongoDB setup &amp; troubleshooting</summary>
+              <div class="onboarding-mongodb-help-body">
+                <p class="onboarding-mongodb-help-lead">Use a free <a href="https://www.mongodb.com/cloud/atlas/register" class="onboarding-inline-link" target="_blank" rel="noopener">MongoDB Atlas</a> cluster or a local server at <code>mongodb://localhost:27017</code>.</p>
+                <ol class="onboarding-mongodb-help-list">
+                  <li>Create a database user in Atlas <strong>Database Access</strong>.</li>
+                  <li>In Atlas: <strong>Clusters</strong> → <strong>Connect</strong> → <strong>Drivers</strong> → copy the connection string.</li>
+                  <li>Replace <code>&lt;db_password&gt;</code> with your database user password.</li>
+                  <li>Add <code>/adele</code> before the <code>?</code> in the URI (or keep database name <strong>adele</strong> below).</li>
+                  <li>In Atlas: <strong>Network Access</strong> → <strong>Add IP Address</strong> → add your current IP (or allow anywhere for dev).</li>
+                  <li>Click <strong>Create Collections</strong> after a successful test. The first run can take up to a minute.</li>
+                </ol>
+                <p class="onboarding-mongodb-help-subtitle">If the test times out</p>
+                <p class="onboarding-mongodb-help-text">Some routers cannot resolve <code>mongodb+srv://</code> URLs. Fix DNS, then test again:</p>
+                <pre class="onboarding-mongodb-help-code">Set-DnsClientServerAddress -InterfaceAlias "WiFi" -ServerAddresses ("8.8.8.8","1.1.1.1")
+ipconfig /flushdns
+nslookup your-cluster.mongodb.net</pre>
+                <p class="onboarding-mongodb-help-note">Run in <strong>PowerShell as Administrator</strong>. Replace <code>WiFi</code> with your adapter name if needed (<code>Get-NetAdapter</code>). If DNS still fails, use a standard <code>mongodb://</code> URI from Atlas instead of <code>mongodb+srv://</code>.</p>
+              </div>
+            </details>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Voice replies</p>
+            <p class="settings-hint">Optional premium voice output via ElevenLabs. Gemini handles reasoning; ElevenLabs adds Scribe transcription and a custom spoken voice. Get an API key at <a href="https://elevenlabs.io/app/settings/api-keys" id="settings-link-eleven" class="onboarding-inline-link">elevenlabs.io</a>.</p>
+            <label class="settings-label" for="settings-elevenlabs-key">ElevenLabs API key</label>
+            <input type="password" id="settings-elevenlabs-key" class="onboarding-input onboarding-input-secondary" autocomplete="off" spellcheck="false" />
+            <p class="onboarding-field-status" id="settings-elevenlabs-status" role="status" aria-live="polite"></p>
+            <label class="settings-label">Voice selection</label>
+            <div class="onboarding-voice-picker settings-voice-picker">
+              <div class="onboarding-voice-list" id="settings-voice-list" role="radiogroup" aria-label="ElevenLabs voices"></div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Desktop permissions</p>
+            <p class="settings-hint">ADELE only sees your screen when you ask. Configure which capabilities ADELE may request.</p>
+            <div class="settings-permissions-group">
+              <div class="settings-permission-item">
+                <label class="settings-checkbox-container">
+                  <input type="checkbox" id="settings-perm-mic" checked />
+                  <span class="settings-checkbox-checkmark"></span>
+                  <span class="settings-checkbox-label">Microphone</span>
+                </label>
+                <span class="settings-permission-desc">To hear voice requests. Can be replaced with text input.</span>
+              </div>
+              <div class="settings-permission-item">
+                <label class="settings-checkbox-container">
+                  <input type="checkbox" id="settings-perm-screen" checked />
+                  <span class="settings-checkbox-checkmark"></span>
+                  <span class="settings-checkbox-label">Screen capture</span>
+                </label>
+                <span class="settings-permission-desc">To understand what you are asking about. Raw screenshots are not stored by default.</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Memory rules</p>
+            <p class="settings-hint">You own ADELE's memory. ADELE can suggest what to remember, but you decide what becomes long-term memory.</p>
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="settings-rule-approve" checked />
+              <span>Require approval before saving memories</span>
+            </label>
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="settings-rule-noscreenshot" checked />
+              <span>Do not store raw screenshots</span>
+            </label>
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="settings-rule-summaries" checked />
+              <span>Save only summaries (not raw screen dumps)</span>
+            </label>
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="settings-rule-sensitive" checked />
+              <span>Disable memory for sensitive apps (password managers, banking)</span>
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Default mode</p>
+            <p class="settings-hint">Start in Guide Mode. ADELE will show you where to go and what to do, while you stay in control.</p>
+            <div class="settings-mode-toggles">
+              <button type="button" class="onboarding-btn secondary settings-mode-btn active" id="settings-mode-guide">Guide Mode</button>
+              <button type="button" class="onboarding-btn secondary settings-mode-btn" id="settings-mode-assist">Assist Mode</button>
+            </div>
+            <p class="settings-hint subtle">Autopilot Mode is coming later and remains disabled in this build.</p>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Voice input</p>
+            <p class="settings-hint"><strong>Hold Alt</strong> anywhere to turn the mic on and talk. Release Alt to transcribe with ElevenLabs Scribe v2 (when configured) and send your command. Wake word and conversation mode still work when you are not holding Alt.</p>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Global shortcut</p>
+            <p class="settings-hint">Choose a reliable way to open ADELE. You can change this later.</p>
+            <select id="settings-shortcut-select" class="onboarding-input onboarding-input-secondary onboarding-select">
+              <option value="CommandOrControl+Shift+Space" selected>Ctrl + Shift + Space</option>
+              <option value="CommandOrControl+Space">Ctrl + Space</option>
+              <option value="Alt+Space">Alt + Space</option>
+              <option value="CommandOrControl+Shift+A">Ctrl + Shift + A</option>
+            </select>
+          </section>
+
+          <section class="settings-section">
+            <p class="settings-section-kicker">Test ADELE</p>
+            <p class="settings-hint">Ask ADELE: &ldquo;What am I looking at?&rdquo; to verify screen awareness and memory connection.</p>
+            <div class="settings-test-card">
+              <div class="settings-test-head">
+                <span>Verification test</span>
+                <span id="settings-test-status">Not verified</span>
+              </div>
+              <button type="button" class="onboarding-btn onboarding-btn-gradient" id="settings-test-btn">Ask: &ldquo;What am I looking at?&rdquo;</button>
+              <div id="settings-test-response-box" class="hidden settings-test-response">
+                <p id="settings-test-response-text"></p>
+              </div>
+            </div>
+          </section>
+
+          <div class="settings-footer">
+          <p id="settings-win-python-note" class="settings-win-python-note hidden" role="note">
+            <strong>Windows Runtime</strong> - ADELE includes <strong>Python 3.12</strong> on Windows. If the bundled runtime is missing, install <strong>Python 3.10-3.13</strong> with <strong>Add python.exe to PATH</strong> enabled.
+          </p>
+          <p class="settings-status" id="settings-status" aria-live="polite"></p>
+          <div class="settings-actions">
+            <button type="button" class="onboarding-btn secondary settings-btn-cancel" id="settings-cancel">Cancel</button>
+            <button type="button" class="onboarding-btn onboarding-btn-gradient" id="settings-save">Save &amp; restart backend</button>
+          </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script src="../node_modules/katex/dist/katex.min.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+
+</html>
