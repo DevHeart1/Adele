@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ADELE Bridge Settings</title>
+    <style>
+      :root {
+        --bg: #111111;
+        --card: #1d1d1d;
+        --border: rgba(184, 255, 44, 0.18);
+        --text: #f7f7f2;
+        --muted: #a5aa9b;
+        --dim: #6f7568;
+        --lime: #b8ff2c;
+      }
+
+      body {
+        margin: 0;
+        padding: 24px;
+        max-width: 480px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 18px;
+      }
+
+      .header img {
+        border-radius: 10px;
+        box-shadow: 0 0 14px rgba(184, 255, 44, 0.28);
+      }
+
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+
+      .subtitle {
+        color: var(--muted);
+        font-size: 12px;
+        margin: 0;
+      }
+
+      .field {
+        margin-bottom: 16px;
+      }
+
+      label {
+        display: block;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        margin-bottom: 6px;
+      }
+
+      .hint {
+        font-size: 11px;
+        color: var(--dim);
+        margin-top: 4px;
+      }
+
+      input[type="text"], input[type="password"] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--card);
+        color: var(--text);
+        font-size: 13px;
+        outline: none;
+      }
+
+      input:focus {
+        border-color: rgba(184, 255, 44, 0.45);
+        box-shadow: 0 0 0 3px rgba(184, 255, 44, 0.1);
+      }
+
+      .actions {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+      }
+
+      button {
+        flex: 1;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        font-weight: 700;
+        font-size: 13px;
+        cursor: pointer;
+      }
+
+      .btn-primary {
+        background: var(--lime);
+        color: #111111;
+      }
+
+      .btn-secondary {
+        background: #282828;
+        color: var(--text);
+        border: 1px solid var(--border);
+        font-weight: 600;
+      }
+
+      .status {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border-radius: 10px;
+        font-size: 12px;
+        display: none;
+      }
+
+      .status.ok {
+        display: block;
+        background: rgba(184, 255, 44, 0.1);
+        color: var(--lime);
+        border: 1px solid rgba(184, 255, 44, 0.24);
+      }
+
+      .status.err {
+        display: block;
+        background: rgba(255, 107, 107, 0.1);
+        color: #ff6b6b;
+        border: 1px solid rgba(255, 107, 107, 0.24);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <img src="icons/icon-48.png" width="40" height="40" alt="" />
+      <div>
+        <h1>ADELE Bridge Settings</h1>
+        <p class="subtitle">Configure the connection to your ADELE desktop app.</p>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="bridgeUrl">Bridge WebSocket URL</label>
+      <input type="text" id="bridgeUrl" placeholder="ws://127.0.0.1:8765" />
+      <div class="hint">The WebSocket URL of the ADELE browser bridge server running on your machine.</div>
+    </div>
+
+    <div class="field">
+      <label for="bridgeToken">Bridge Token</label>
+      <input type="password" id="bridgeToken" placeholder="Enter bridge authentication token" />
+      <div class="hint">Authentication token for the bridge connection. Default is <code>dev-bridge-token</code>.</div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="saveBtn">Save Settings</button>
+      <button class="btn-secondary" id="resetBtn">Reset to Defaults</button>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>
