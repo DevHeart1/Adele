@@ -52,25 +52,9 @@ const SETTINGS_HOTKEYS = parseAcceleratorList(
 
 const WINDOW_LEVEL = "screen-saver";
 const APP_USER_MODEL_ID = "com.startrz.adele";
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
-const DEPRECATED_MODEL_ALIASES = new Map([
-  ["gemini-3.5-flash-live-preview", DEFAULT_GEMINI_MODEL],
-  ["models/gemini-3.5-flash-live-preview", DEFAULT_GEMINI_MODEL],
-  ["antigravity-preview-05-2026", DEFAULT_GEMINI_MODEL],
-  ["models/antigravity-preview-05-2026", DEFAULT_GEMINI_MODEL],
-]);
-
 function normalizeSavedCredentials(creds = {}) {
   if (!creds || typeof creds !== "object") return {};
-  const next = { ...creds };
-  for (const key of ["gemini_model", "gemini_live_model", "gemini_fast_model", "model"]) {
-    const value = String(next[key] || "").trim();
-    if (DEPRECATED_MODEL_ALIASES.has(value)) {
-      next[key] = DEPRECATED_MODEL_ALIASES.get(value);
-      next.model_migrated_from = value;
-    }
-  }
-  return next;
+  return { ...creds };
 }
 
 app.setName("ADELE");
@@ -156,18 +140,14 @@ const CRED_FILE = path.join(app.getPath("userData"), "credentials.enc");
 
 /**
  * Check whether we have *usable* saved credentials (file exists,
- * decrypts successfully, and contains a Gemini API key).
- * Returns true only when the user can skip onboarding.
+ * decrypts successfully). ChatGPT credentials are owned by Codex rather than
+ * this encrypted file, so this is intentionally not an LLM-auth gate.
  */
 function hasUsableCredentials() {
   if (!fs.existsSync(CRED_FILE)) return false;
   const creds = loadCredentials();          // returns null on any failure
   if (!creds) return false;
-  if (creds.llm_provider === "ollama") return !!creds.local_model;
-  if (creds.llm_provider === "openai-compatible-local") {
-    return !!(creds.local_base_url && creds.local_model);
-  }
-  return !!creds.gemini_api_key;
+  return true;
 }
 
 function sleep(ms) {
@@ -699,14 +679,13 @@ async function startPythonBackendInner() {
 
   console.log("[Backend] Starting Python server...");
 
-  // Load saved credentials and inject API keys into Python's environment
+  // Load only non-LLM preferences. ChatGPT credentials remain inside Codex.
   const savedCreds = loadCredentials();
   const spawnEnv = {
     ...process.env,
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
   };
-  if (savedCreds?.gemini_api_key) spawnEnv.GEMINI_API_KEY = savedCreds.gemini_api_key;
   const mongoUri = (savedCreds?.mongodb_uri ?? "").trim();
   const mongoDb = (savedCreds?.mongodb_db ?? "").trim();
   if (mongoUri) {
@@ -717,31 +696,7 @@ async function startPythonBackendInner() {
     spawnEnv.ADELE_MONGODB_DB = mongoDb;
     spawnEnv.MONGODB_DB = mongoDb;
   }
-  const llmProvider = (savedCreds?.llm_provider ?? "gemini").trim();
-  spawnEnv.ADELE_LLM_PROVIDER = llmProvider;
-  const localModel = (savedCreds?.local_model ?? "").trim();
-  const localBaseUrl = (savedCreds?.local_base_url ?? "").trim();
-  const localApiKey = (savedCreds?.local_api_key ?? "").trim();
-  if (localModel) {
-    spawnEnv.ADELE_LOCAL_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_FAST_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_POWERFUL_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_ROUTING_MODEL = localModel;
-  }
-  if (localBaseUrl) spawnEnv.ADELE_LOCAL_BASE_URL = localBaseUrl;
-  if (localApiKey) spawnEnv.ADELE_LOCAL_API_KEY = localApiKey;
-  if (typeof savedCreds?.local_supports_tools !== "undefined") {
-    spawnEnv.ADELE_LOCAL_SUPPORTS_TOOLS = savedCreds.local_supports_tools ? "1" : "0";
-  }
-  if (typeof savedCreds?.local_supports_vision !== "undefined") {
-    spawnEnv.ADELE_LOCAL_SUPPORTS_VISION = savedCreds.local_supports_vision ? "1" : "0";
-  }
-  const geminiModel = (savedCreds?.gemini_model ?? DEFAULT_GEMINI_MODEL).trim();
-  if (geminiModel && llmProvider === "gemini") {
-    spawnEnv.GEMINI_FAST_MODEL = geminiModel;
-    spawnEnv.GEMINI_POWERFUL_MODEL = geminiModel;
-    spawnEnv.GEMINI_ROUTING_MODEL = geminiModel;
-  }
+  spawnEnv.ADELE_LLM_PROVIDER = "codex-app-server";
   // Use saved Picovoice key if set, otherwise fall back to the bundled default
   spawnEnv.PICOVOICE_ACCESS_KEY = savedCreds?.picovoice_key || BUNDLED_PICOVOICE_KEY;
 
@@ -1507,13 +1462,10 @@ app.whenReady().then(async () => {
   // Initialise auto-updater (checks GitHub Releases in the background)
   initAutoUpdater();
 
-  // Returning user (credentials valid): start backend immediately with saved API keys.
-  // First launch / corrupt credentials: renderer shows onboarding first.
-  if (hasUsableCredentials()) {
-    // Brief pause for window to finish loading before setup:progress events fire
-    await new Promise(r => setTimeout(r, 800));
-    startPythonBackend();
-  }
+  // Start for every user. Codex owns the ChatGPT session, so no API key is
+  // required before the local backend can present the sign-in experience.
+  await new Promise(r => setTimeout(r, 800));
+  startPythonBackend();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1826,6 +1778,29 @@ ipcMain.handle("app:open-external", async (_event, rawUrl) => {
     await shell.openExternal(url.toString());
     return true;
   } catch {
+    return false;
+  }
+});
+
+function isAllowedCodexAuthUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    const hostname = url.hostname.toLowerCase();
+    const allowed = hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com")
+      || hostname === "openai.com" || hostname.endsWith(".openai.com");
+    return url.protocol === "https:" && allowed && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle("auth:open-codex-url", async (_event, rawUrl) => {
+  if (!isAllowedCodexAuthUrl(rawUrl)) return false;
+  try {
+    await shell.openExternal(String(rawUrl));
+    return true;
+  } catch {
+    // Do not interpolate an auth URL or the underlying Electron error.
     return false;
   }
 });

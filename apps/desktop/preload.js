@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("overlayAPI", {
   logError: (msg) => ipcRenderer.send("log-error", msg),
   logInfo: (msg) => ipcRenderer.send("log-info", msg),
   openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
+  openCodexAuthUrl: (url) => ipcRenderer.invoke("auth:open-codex-url", url),
 
   // ── Auth / Credentials ──
   loadCredentials: () => ipcRenderer.invoke("auth:load-credentials"),

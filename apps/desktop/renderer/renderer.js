@@ -2158,6 +2158,24 @@ function connectWebSocket() {
 
       console.log("[WS] Received:", msg);
 
+      if (msg.type === "codex_auth_state") {
+        renderCodexAuthState(msg.state);
+        return;
+      }
+      if (msg.type === "codex_auth_login_result") {
+        const result = msg.result || {};
+        if (result.authUrl) {
+          bridge.openCodexAuthUrl?.(result.authUrl).then((opened) => {
+            if (!opened && chatgptStatus) chatgptStatus.textContent = "Could not open the ChatGPT sign-in page. Try again or use device code.";
+          });
+        }
+        if (result.userCode && chatgptDeviceCode) {
+          chatgptDeviceCode.textContent = `Enter code ${result.userCode} in the browser window.`;
+          chatgptDeviceCode.classList.remove("hidden");
+        }
+        return;
+      }
+
       if (msg.type === "test_gemini_result") {
         if (pendingGeminiTest) {
           pendingGeminiTest(msg);
@@ -2203,6 +2221,13 @@ function connectWebSocket() {
           app.automationLockToolCount = 0;
           void setAutomationLock(false);
         }
+        return;
+      }
+
+      if (msg.type === "model_trace") {
+        const model = msg.model || "GPT-5.6";
+        const reasoning = msg.reasoning || "medium";
+        setState(State.DOING, { text: `${model} · Reasoning: ${reasoning}`, force: true });
         return;
       }
 
@@ -2636,7 +2661,7 @@ const elevenlabsKeyInput = document.getElementById("onboarding-elevenlabs-key");
 const elevenlabsStatus = document.getElementById("onboarding-elevenlabs-status");
 const elevenlabsVoiceList = document.getElementById("onboarding-voice-list");
 const elevenlabsVoiceStatus = document.getElementById("onboarding-voice-status");
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const DEFAULT_GEMINI_MODEL = "gpt-5.6"; // Legacy identifier retained for settings DOM compatibility.
 const next0Btn = document.getElementById("onboarding-next-0");
 const next0BtnLabel = next0Btn?.querySelector(".onboarding-btn-label");
 const nextWakeBtn = document.getElementById("onboarding-next-wake");
@@ -2665,13 +2690,65 @@ const ollamaStatusText = document.getElementById("ollama-status-text");
 const ollamaRefresh = document.getElementById("ollama-refresh");
 const nextLocalBtn = document.getElementById("onboarding-next-local");
 const nextLocalBtnLabel = nextLocalBtn?.querySelector(".onboarding-btn-label");
+const chatgptConnectBtn = document.getElementById("onboarding-chatgpt-connect");
+const chatgptDeviceBtn = document.getElementById("onboarding-chatgpt-device");
+const chatgptCancelBtn = document.getElementById("onboarding-chatgpt-cancel");
+const chatgptStatus = document.getElementById("onboarding-chatgpt-status");
+const chatgptAccount = document.getElementById("onboarding-chatgpt-account");
+const chatgptDeviceCode = document.getElementById("onboarding-device-code");
+const settingsCodexCheck = document.getElementById("settings-codex-check");
+const settingsCodexLogout = document.getElementById("settings-codex-logout");
+let codexAuthState = null;
+
+function sendCodexAuth(type, extra = {}) {
+  if (!app.ws || app.ws.readyState !== WebSocket.OPEN) {
+    if (chatgptStatus) chatgptStatus.textContent = "Adele is starting its local connection. Try again in a moment.";
+    return;
+  }
+  app.ws.send(JSON.stringify({ type, ...extra }));
+}
+
+function renderCodexAuthState(state) {
+  codexAuthState = state || {};
+  const status = String(codexAuthState.state || "STARTING_RUNTIME");
+  const message = codexAuthState.message || "";
+  if (chatgptStatus) chatgptStatus.textContent = message || ({ READY: "Connected with ChatGPT", SIGNED_OUT: "Continue with ChatGPT", LOGIN_PENDING: "Complete sign-in in your browser" }[status] || "Checking Codex connection...");
+  if (chatgptAccount) {
+    chatgptAccount.textContent = status === "READY"
+      ? `Model: ${codexAuthState.displayModel || "GPT-5.6"} · Reasoning: ${codexAuthState.reasoningEffort || "Medium"} · Status: Ready${codexAuthState.email ? ` · ${codexAuthState.email}` : ""}`
+      : "";
+  }
+  if (chatgptConnectBtn) {
+    chatgptConnectBtn.disabled = status === "STARTING_RUNTIME" || status === "LOGIN_STARTING";
+    const label = chatgptConnectBtn.querySelector("span");
+    if (label) label.textContent = status === "READY" ? "Start using Adele" : "Continue with ChatGPT";
+  }
+  chatgptDeviceBtn?.classList.toggle("hidden", status !== "LOGIN_PENDING");
+  chatgptCancelBtn?.classList.toggle("hidden", status !== "LOGIN_PENDING");
+  if (settingsGeminiStatus) settingsGeminiStatus.textContent = message;
+  setGeminiStatusPill(status === "READY" ? "connected" : status === "ERROR" ? "error" : "idle", status === "READY" ? "Connected with ChatGPT" : undefined);
+  if (settingsGeminiModel) settingsGeminiModel.textContent = codexAuthState.displayModel || "GPT-5.6";
+}
 
 if (onboardingStart) {
   onboardingStart.addEventListener("click", () => {
     showOnboardingStep(1);
-    geminiKeyInput?.focus();
+    chatgptConnectBtn?.focus();
+    sendCodexAuth("codex_auth_status");
   });
 }
+
+chatgptConnectBtn?.addEventListener("click", () => {
+  if (codexAuthState?.state === "READY") {
+    showOnboardingStep(2);
+    return;
+  }
+  sendCodexAuth("codex_auth_login");
+});
+chatgptDeviceBtn?.addEventListener("click", () => sendCodexAuth("codex_auth_login", { device_code: true }));
+chatgptCancelBtn?.addEventListener("click", () => sendCodexAuth("codex_auth_cancel"));
+settingsCodexCheck?.addEventListener("click", () => sendCodexAuth("codex_auth_status"));
+settingsCodexLogout?.addEventListener("click", () => sendCodexAuth("codex_auth_logout"));
 
 function setLocalRuntime(runtime) {
   selectedLocalRuntime = runtime === "custom" ? "custom" : "ollama";
@@ -3201,15 +3278,6 @@ if (settingsCancel) settingsCancel.addEventListener("click", () => closeSettings
 
 if (settingsSave) {
   settingsSave.addEventListener("click", async () => {
-    const geminiKey = settingsGeminiKey?.value.trim() ?? "";
-    if (!geminiKey) {
-      if (settingsStatus) {
-        settingsStatus.textContent = "Gemini API key is required.";
-        settingsStatus.classList.add("error");
-      }
-      settingsGeminiKey?.focus();
-      return;
-    }
     if (settingsStatus) settingsStatus.classList.remove("error");
     const prevDisabled = settingsSave.disabled;
     const prevLabel = settingsSave.textContent;
@@ -3223,9 +3291,6 @@ if (settingsSave) {
       const mongoDb = settingsMongodbDb?.value.trim() || "adele";
       const newCreds = {
         ...existing,
-        llm_provider: "gemini",
-        gemini_api_key: geminiKey,
-        gemini_model: DEFAULT_GEMINI_MODEL,
         mongodb_uri: mongoUri,
         mongodb_db: mongoDb,
         default_mode: settingsDefaultMode,

@@ -31,6 +31,7 @@ extraResources:
       - "!__pycache__/**"
       - "!*.pyc"
       - "!.env"
+      - "!providers/codex_schemas/**"
   - from: setup.sh
     to: setup.sh
   - from: scripts/win-alt-ptt.ps1

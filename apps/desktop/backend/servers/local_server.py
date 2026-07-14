@@ -304,6 +304,15 @@ class VoiceAssistant:
         set_tool_run_context(task_id, ws_callback)
 
         try:
+            router_status = self.agent.router.status()
+            auth_state = router_status.get("auth") or {}
+            await ws_callback({
+                "type": "model_trace",
+                "provider": router_status.get("provider", "ChatGPT via Codex App Server"),
+                "model": router_status.get("model", "gpt-5.6"),
+                "reasoning": auth_state.get("reasoningEffort") or "medium",
+                "status": auth_state.get("state") or "STARTING_RUNTIME",
+            })
             if _is_cursor_demo_request(text):
                 await ws_callback({
                     "type": "tool_event",
@@ -852,9 +861,16 @@ class VoiceAssistant:
         self.audio_buffer = bytearray()
 
 
+_shared_assistant = None
+
+
 async def main_handler(websocket):
+    global _shared_assistant
     print("Electron App Connected!")
-    assistant = VoiceAssistant()
+    # Keep the single Codex App Server process alive across renderer reconnects.
+    if _shared_assistant is None:
+        _shared_assistant = VoiceAssistant()
+    assistant = _shared_assistant
     assistant._active_websocket = websocket
     try:
         await assistant.agent.router.initialize()
@@ -864,6 +880,9 @@ async def main_handler(websocket):
     # Initialize UI
     try:
         await websocket.send(json.dumps({"type": "status", "state": "state-idle"}))
+        auth = assistant.agent.router.auth
+        if auth:
+            await websocket.send(json.dumps({"type": "codex_auth_state", "state": auth.snapshot.public()}))
         
         async for message in websocket:
             try:
@@ -878,6 +897,41 @@ async def main_handler(websocket):
                     await assistant.stop_push_to_talk(websocket)
                 elif msg_type == "cancel_task":
                     await assistant.cancel_active_task(websocket)
+                elif msg_type == "codex_auth_status":
+                    auth = assistant.agent.router.auth
+                    state = await auth.check() if auth else None
+                    await websocket.send(json.dumps({
+                        "type": "codex_auth_state",
+                        "state": state.public() if state else {"state": "ERROR", "errorCode": "runtime_error"},
+                    }))
+                elif msg_type == "codex_auth_login":
+                    auth = assistant.agent.router.auth
+                    result = await auth.start_login(device_code=bool(data.get("device_code"))) if auth else {"type": "error", "errorCode": "runtime_error"}
+                    await websocket.send(json.dumps({
+                        "type": "codex_auth_login_result",
+                        "result": result,
+                    }))
+                    if auth:
+                        await websocket.send(json.dumps({"type": "codex_auth_state", "state": auth.snapshot.public()}))
+                        if result.get("type") in {"chatgpt", "chatgptDeviceCode"}:
+                            async def refresh_after_login():
+                                # Codex owns the browser callback; poll only the
+                                # sanitized account/read state until completion.
+                                for _ in range(120):
+                                    await asyncio.sleep(1)
+                                    state = await auth.check()
+                                    await _send_json(websocket, {"type": "codex_auth_state", "state": state.public()})
+                                    if state.state in {"READY", "ERROR", "RUNTIME_MISSING"}:
+                                        return
+                            asyncio.create_task(refresh_after_login())
+                elif msg_type == "codex_auth_cancel":
+                    auth = assistant.agent.router.auth
+                    state = await auth.cancel_login() if auth else None
+                    await websocket.send(json.dumps({"type": "codex_auth_state", "state": state.public() if state else {"state": "SIGNED_OUT"}}))
+                elif msg_type == "codex_auth_logout":
+                    auth = assistant.agent.router.auth
+                    state = await auth.logout() if auth else None
+                    await websocket.send(json.dumps({"type": "codex_auth_state", "state": state.public() if state else {"state": "SIGNED_OUT"}}))
                 elif msg_type == "toggle_conversation_mode":
                     enabled = assistant.toggle_conversation_mode()
                     await websocket.send(json.dumps({
@@ -899,47 +953,10 @@ async def main_handler(websocket):
                             "type": "status", "state": "state-idle"
                         }))
                 elif msg_type == "test_gemini":
-                    api_key = (data.get("api_key") or "").strip()
-                    success = False
-                    error = ""
-                    if not api_key:
-                        error = "Gemini API key is required"
-                    else:
-                        async def _test_gemini_connection():
-                            from google import genai
-                            from google.genai import types
-                            from providers.gemini import DEFAULT_GEMINI_MODEL
-
-                            client = genai.Client(api_key=api_key)
-                            response = await client.aio.models.generate_content(
-                                model=DEFAULT_GEMINI_MODEL,
-                                contents="Reply with exactly: ok",
-                                config=types.GenerateContentConfig(
-                                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
-                                    tools=[
-                                        types.Tool(google_search=types.GoogleSearch()),
-                                        types.Tool(code_execution=types.ToolCodeExecution()),
-                                        types.Tool(url_context=types.UrlContext()),
-                                    ],
-                                ),
-                            )
-                            text = ""
-                            if response.candidates and response.candidates[0].content:
-                                for part in response.candidates[0].content.parts or []:
-                                    if getattr(part, "text", None):
-                                        text += part.text
-                            if not text.strip():
-                                raise RuntimeError("Gemini returned an empty test response")
-
-                        try:
-                            await _test_gemini_connection()
-                            success = True
-                        except Exception as e:
-                            error = str(e)
                     await websocket.send(json.dumps({
                         "type": "test_gemini_result",
-                        "success": success,
-                        "error": error,
+                        "success": False,
+                        "error": "Gemini is inactive. Adele requires ChatGPT through Codex.",
                     }))
                 elif msg_type == "test_mongodb":
                     uri = data.get("uri", "")
@@ -1502,12 +1519,7 @@ async def main():
         print("backend_server.py to enable the wake word.")
         print("!" * 60)
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if not gemini_key:
-        print("!" * 60)
-        print("NOTE: GEMINI_API_KEY not set. Agent will run in fallback mode.")
-        print("Set it with: export GEMINI_API_KEY='your-key-here'")
-        print("!" * 60)
+    print("[Codex] ChatGPT authentication is managed by Codex App Server.")
         
     async with websockets.serve(
         main_handler,
