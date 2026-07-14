@@ -1,0 +1,26 @@
+{
+  "name": "adele-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "ADELE monorepo for desktop, web, browser extensions, and shared agent packages.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "desktop:start": "npm --workspace apps/desktop start",
+    "desktop:build:win": "npm --workspace apps/desktop run build:win",
+    "desktop:build:win:portable": "npm --workspace apps/desktop run build:win:portable",
+    "desktop:build:mac": "npm --workspace apps/desktop run build:mac",
+    "desktop:dist:extension": "npm --workspace apps/desktop run dist:extension",
+    "landing:dev": "npm --workspace apps/landing run dev",
+    "landing:build": "npm --workspace apps/landing run build",
+    "landing:preview": "npm --workspace apps/landing run preview",
+    "web:dev": "npm --workspace apps/web run dev",
+    "web:build": "npm --workspace apps/web run build",
+    "web:start": "npm --workspace apps/web run start",
+    "web-extension:build": "npm --workspace apps/web-extension run build",
+    "test": "npm --workspaces run test --if-present",
+    "build": "npm run landing:build"
+  }
+}
