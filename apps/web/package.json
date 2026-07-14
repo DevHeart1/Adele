@@ -1,0 +1,35 @@
+{
+  "name": "adele-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "prebuild": "npm --prefix ../../packages/shared run build",
+    "build": "next build",
+    "db:create-table": "node scripts/create-dynamodb-table.mjs",
+    "pretest": "npm --prefix ../../packages/shared run build",
+    "test": "tsx --test tests/*.test.ts",
+    "start": "next start",
+    "lint": "next lint",
+    "pretypecheck": "npm --prefix ../../packages/shared run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.954.0",
+    "@aws-sdk/lib-dynamodb": "^3.954.0",
+    "@adele/shared": "0.1.0",
+    "next": "^16.1.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/node": "^24.10.3",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "tailwindcss": "^4.1.18",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
