@@ -1,0 +1,7 @@
+# ADELE desktop backend development/test dependencies
+
+-r requirements.txt
+
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+mongomock>=4.1.0
