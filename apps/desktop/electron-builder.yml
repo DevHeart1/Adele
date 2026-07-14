@@ -1,0 +1,120 @@
+# Electron Builder — ADELE (desktop app + enterprise-style Windows installer)
+# See: https://www.electron.build/configuration
+
+appId: com.startrz.adele
+productName: ADELE
+electronVersion: 36.9.5
+copyright: Copyright © 2026 Startrz Technologies
+
+directories:
+  buildResources: build
+  output: release
+
+asar: true
+
+afterPack: scripts/stamp-windows-icon.cjs
+afterSign: build/notarize.cjs
+
+files:
+  - main.js
+  - preload.js
+  - renderer/**/*
+  - node_modules/**/*
+  - "!node_modules/electron/**"
+  - "!node_modules/electron-builder/**"
+
+extraResources:
+  - from: backend
+    to: backend
+    filter:
+      - "**/*"
+      - "!__pycache__/**"
+      - "!*.pyc"
+      - "!.env"
+  - from: setup.sh
+    to: setup.sh
+  - from: scripts/win-alt-ptt.ps1
+    to: scripts/win-alt-ptt.ps1
+  - from: build/icon.ico
+    to: build/icon.ico
+  - from: build/python/win-x64
+    to: python/win-x64
+    filter:
+      - "**/*"
+  - from: wheelhouse
+    to: wheelhouse
+    filter:
+      - "**/*"
+  - from: chrome_extension
+    to: chrome_extension
+    filter:
+      - "**/*"
+      - "!*.bak"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  executableName: ADELE
+  signtoolOptions:
+    publisherName: Startrz Technologies
+  requestedExecutionLevel: asInvoker
+  artifactName: ADELE-Setup-${version}.${ext}
+  legalTrademarks: ADELE is a trademark of Startrz Technologies.
+  verifyUpdateCodeSignature: false
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  perMachine: false
+
+  shortcutName: ADELE
+  # Desktop shortcut is optional (see build/adele-nsis-macros.nsh — "Select additional tasks" page).
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  menuCategory: Startrz Technologies
+
+  installerIcon: build/installerIcon.ico
+  uninstallerIcon: build/installerIcon.ico
+  installerSidebar: build/installerSidebar.bmp
+
+  license: build/license.txt
+  include: build/adele-nsis-macros.nsh
+
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+
+mac:
+  icon: build/icon.icns
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - universal
+  darkModeSupport: true
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  identity: null
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false
+
+dmg:
+  title: ADELE
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+publish:
+  provider: github
+  owner: mylife-as-miles
+  repo: adele
+  releaseType: release
