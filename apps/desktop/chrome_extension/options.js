@@ -5,7 +5,7 @@
 
 const DEFAULTS = {
   bridgeUrl: "ws://127.0.0.1:8765",
-  bridgeToken: "dev-bridge-token",
+  bridgeToken: "",
 };
 
 const bridgeUrlEl = document.getElementById("bridgeUrl");
