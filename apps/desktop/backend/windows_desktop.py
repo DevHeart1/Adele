@@ -81,6 +81,67 @@ async def get_active_window_info() -> ActiveWindowInfo:
     return await asyncio.to_thread(get_active_window_info_sync)
 
 
+def _focus_terms(app_name: str) -> tuple[str, ...]:
+    target = " ".join((app_name or "").lower().split())
+    aliases = {
+        "google chrome": ("google chrome", "chrome"),
+        "chrome": ("google chrome", "chrome"),
+        "microsoft edge": ("microsoft edge", "edge"),
+        "edge": ("microsoft edge", "edge"),
+        "visual studio code": ("visual studio code", "code"),
+        "vs code": ("visual studio code", "code"),
+        "file explorer": ("file explorer", "explorer"),
+    }
+    return aliases.get(target, (target,)) if target else ()
+
+
+def focus_app_sync(app_name: str) -> bool:
+    """Bring a visible application window to the foreground on Windows."""
+    if not IS_WINDOWS:
+        return False
+
+    terms = _focus_terms(app_name)
+    if not terms:
+        return False
+
+    try:
+        from pywinauto import Desktop
+
+        candidates = []
+        for window in Desktop(backend="uia").windows():
+            try:
+                if not window.is_visible():
+                    continue
+                title = (window.window_text() or "").lower()
+                score = max((100 if term == title else 75 if term in title else 0) for term in terms)
+                if score:
+                    candidates.append((score, window))
+            except Exception:
+                continue
+
+        if not candidates:
+            return False
+
+        _, target = max(candidates, key=lambda item: item[0])
+        try:
+            target.set_focus()
+        except Exception:
+            hwnd = int(target.handle)
+            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            if not ctypes.windll.user32.SetForegroundWindow(hwnd):
+                return False
+        time.sleep(0.12)
+        active = get_active_window_info_sync()
+        observed = f"{active.app_name} {active.window_title}".lower()
+        return any(term in observed for term in terms)
+    except Exception:
+        return False
+
+
+async def focus_app(app_name: str) -> bool:
+    return await asyncio.to_thread(focus_app_sync, app_name)
+
+
 async def get_clipboard_text() -> Optional[str]:
     if not IS_WINDOWS:
         return None

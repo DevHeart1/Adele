@@ -1188,13 +1188,44 @@ async def browser_assert(expectation: str, session_id: str = "") -> str:
         "required": []
     }
 )
-async def browser_list_tabs(query: str = "") -> str:
-    # First try to refresh the tab list from Chrome via AppleScript
+async def browser_list_tabs(query: str = "", summary_only: bool = False) -> str:
+    """Return tabs known by the actively connected browser bridge.
+
+    A tab query is read-only. In particular, this function never launches or
+    focuses Chrome when the extension is unavailable.
+    """
+    if not browser_bridge.is_connected():
+        return json.dumps({
+            "status": "browser_bridge_unavailable",
+            "count": 0,
+            "total_tabs": 0,
+            "message": (
+                "ADELE cannot inspect Chrome tabs because the ADELE Browser Bridge "
+                "extension is not connected. I did not open Chrome."
+            ),
+        })
+
+    # Request a fresh inventory from the already connected extension. This does
+    # not navigate, focus, or otherwise change the browser.
+    requested_inventory = await browser_bridge.request_tab_inventory()
+    if requested_inventory:
+        await browser_bridge.wait_for_tab_inventory(timeout=1.0)
+
+    # Preserve the legacy macOS fallback for callers outside the extension
+    # bridge; it is a no-op on Windows.
     await _refresh_chrome_tabs()
 
     tabs = browser_store.get_tabs()
     if not tabs:
-        return json.dumps({"tabs": [], "count": 0, "message": "No known open browser tabs."})
+        payload = {
+            "status": "ok",
+            "count": 0,
+            "total_tabs": 0,
+            "message": "No browser tabs were reported by the connected extension.",
+        }
+        if not summary_only:
+            payload["tabs"] = []
+        return json.dumps(payload)
 
     query_lower = query.lower().strip() if query else ""
     filtered = []
@@ -1210,11 +1241,14 @@ async def browser_list_tabs(query: str = "") -> str:
             "age_seconds": round(time.time() - tab.last_seen, 1),
         })
 
-    return json.dumps({
-        "tabs": filtered[:20],
+    payload = {
+        "status": "ok",
         "count": len(filtered),
         "total_tabs": len(tabs),
-    }, ensure_ascii=False)
+    }
+    if not summary_only:
+        payload["tabs"] = filtered[:20]
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @registry.register(
