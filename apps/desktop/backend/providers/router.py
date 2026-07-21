@@ -99,3 +99,11 @@ class ModelRouter:
             "auth": snapshot,
             "legacy_providers_active": False,
         }
+
+    @staticmethod
+    def _looks_trivial_fast_request(text: str) -> bool:
+        """Legacy planner hint only; routing still always selects GPT-5.6."""
+        normalized = (text or "").strip().lower()
+        if normalized in {"proceed", "go ahead", "yes", "approved", "start"}:
+            return False
+        return normalized.startswith(("open ", "launch ")) and " and " not in normalized and len(normalized) <= 50

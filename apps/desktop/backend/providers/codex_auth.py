@@ -131,8 +131,9 @@ class CodexAuthService:
             self.snapshot.state = AuthState.LOGIN_STARTING.value
             login_type = "chatgptDeviceCode" if device_code else "chatgpt"
             params: dict[str, Any] = {"type": login_type}
-            if not device_code:
-                params.update({"appBrand": "chatgpt", "useHostedLoginSuccessPage": True})
+            # Let Codex complete its normal localhost callback.  Requesting the
+            # hosted ChatGPT success page asks the browser to open the separate
+            # ChatGPT desktop application instead of returning to Adele.
             try:
                 response = await self.client.call("account/login/start", params, timeout=30)
             except Exception as exc:

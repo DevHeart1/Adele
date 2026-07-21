@@ -180,11 +180,13 @@ class CodexRpcClient:
                 raise CodexProcessError("Codex connection closed.") from exc
 
     async def _read_stdout(self) -> None:
-        assert self._process and self._process.stdout
+        process = self._process
+        if not process or not process.stdout:
+            return
         try:
             while True:
                 try:
-                    line = await self._process.stdout.readline()
+                    line = await process.stdout.readline()
                 except ValueError:
                     self.last_error_code = "message_too_large"
                     return
@@ -249,17 +251,21 @@ class CodexRpcClient:
         await self._write(response)
 
     async def _drain_stderr(self) -> None:
-        assert self._process and self._process.stderr
+        process = self._process
+        if not process or not process.stderr:
+            return
         while True:
-            line = await self._process.stderr.readline()
+            line = await process.stderr.readline()
             if not line:
                 return
             # Stderr may include prompts or auth URLs. Keep only a classification.
             self.last_error_code = "runtime_stderr" if redact_text(line.decode("utf-8", "replace")).strip() else self.last_error_code
 
     async def _watch_process(self) -> None:
-        assert self._process
-        await self._process.wait()
+        process = self._process
+        if not process:
+            return
+        await process.wait()
         self._initialized = False
         self._fail_pending(CodexProcessError("Codex runtime exited."))
 

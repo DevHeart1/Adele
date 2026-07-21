@@ -146,12 +146,35 @@ class CodexAppServerProvider(LLMProvider):
             },
         }
 
+    @staticmethod
+    def _tool_contract_prompt(prompt: str, tools: list[dict]) -> str:
+        """Request Adele's validated tool envelope without App Server outputSchema."""
+        names = sorted({
+            str(item.get("name") or item.get("function", {}).get("name") or "").strip()
+            for item in tools
+        } - {""})
+        if not names:
+            return prompt
+        return (
+            f"{prompt}\n\n"
+            "If you need an Adele tool, return only one JSON object with this shape: "
+            '{"message":"brief user-facing update","tool_calls":[{"name":"allowed tool name","arguments":{}}]}. '
+            "If no tool is needed, return the same object with an empty tool_calls array. "
+            f"Allowed tool names: {', '.join(names)}."
+        )
+
     def _parse_result(self, text: str, tools: list[dict]) -> tuple[str, list[ToolCall]]:
         if not tools:
             return text, []
         names = {str(item.get("name") or item.get("function", {}).get("name") or "") for item in tools}
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            first_newline = candidate.find("\n")
+            candidate = candidate[first_newline + 1:] if first_newline >= 0 else ""
+            if candidate.rstrip().endswith("```"):
+                candidate = candidate.rstrip()[:-3].strip()
         try:
-            parsed = json.loads(text)
+            parsed = json.loads(candidate)
         except (TypeError, json.JSONDecodeError):
             return text, []
         if not isinstance(parsed, dict):
@@ -186,7 +209,7 @@ class CodexAppServerProvider(LLMProvider):
         if model.reasoning_efforts and effort not in {item.lower() for item in model.reasoning_efforts}:
             effort = model.default_reasoning_effort
         self.last_trace = ExecutionTrace(model=model.model, reasoning_effort=effort, status="running")
-        inputs: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        inputs: list[dict[str, Any]] = [{"type": "text", "text": self._tool_contract_prompt(prompt, tools)}]
         screenshot_path: str | None = None
         if image_data:
             if not model.supports_images:
@@ -199,6 +222,12 @@ class CodexAppServerProvider(LLMProvider):
                 handle.close()
             inputs.append({"type": "localImage", "path": screenshot_path, "detail": "auto"})
         try:
+            streamed_text = ""
+            # Codex App Server 0.144.2 accepts outputSchema in its protocol but
+            # GPT-5.6-Sol terminates both planner and tool-envelope turns with a
+            # system error when it is supplied.  Adele requests the same JSON
+            # shapes in prompt text and continues to validate tool calls locally.
+            del response_json_schema
             result = await self.client.call(
                 "turn/start",
                 {
@@ -206,7 +235,7 @@ class CodexAppServerProvider(LLMProvider):
                     "input": inputs,
                     "model": model.model,
                     "effort": effort,
-                    "outputSchema": response_json_schema or self._schema_for_tools(tools),
+                    "outputSchema": None,
                 },
                 timeout=45,
             )
@@ -222,6 +251,7 @@ class CodexAppServerProvider(LLMProvider):
                 if method == "item/agentMessage/delta":
                     delta = str(params.get("delta") or "")
                     final_text += delta
+                    streamed_text += delta
                     if stream_queue is not None and delta:
                         await stream_queue.put(LLMResponse(text=delta, provider=self.name, model=model.model, reasoning_effort=effort))
                 elif method == "thread/tokenUsage/updated":
@@ -242,6 +272,11 @@ class CodexAppServerProvider(LLMProvider):
                     break
             self.last_trace.status = "completed"
             text, tool_calls = self._parse_result(final_text, tools)
+            # App Server's completed turn contains a full message snapshot.
+            # Stream consumers append chunks, so return only the not-yet-seen
+            # suffix on the terminal response rather than replaying deltas.
+            if stream_queue is not None and streamed_text and text.startswith(streamed_text):
+                text = text[len(streamed_text):]
             return LLMResponse(text=text, tool_calls=tool_calls, provider=self.name, model=model.model, reasoning_effort=effort, usage={"input": self.last_trace.input_tokens, "output": self.last_trace.output_tokens}, trace=self.last_trace.public())
         except (CodexTurnInterrupted, CodexTurnFailed, CodexRequestTimeout) as exc:
             self.last_trace.status = "failed"
