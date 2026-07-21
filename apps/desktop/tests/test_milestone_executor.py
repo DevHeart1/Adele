@@ -44,6 +44,23 @@ class FakeLLM:
         return FakeResponse('{"done": true, "tool": "", "args": {}, "reasoning": "fallback done"}')
 
 
+async def test_streamed_decision_honors_requested_reasoning_effort():
+    class StreamLLM:
+        def __init__(self):
+            self.call = None
+
+        async def generate_stream(self, **kwargs):
+            self.call = kwargs
+            yield type("Chunk", (), {"text": '{"done": true}', "error": None})()
+
+    provider = StreamLLM()
+    executor = MilestoneExecutor(provider, [])
+    response, _ = await executor._stream_llm_decision("choose the next action", thinking_level="LOW")
+
+    assert response == '{"done": true}'
+    assert provider.call["thinking_level"] == "LOW"
+
+
 def _make_plan(milestones: list[Milestone], task_summary: str = "Test task") -> MilestonePlan:
     return MilestonePlan(
         task_summary=task_summary,
