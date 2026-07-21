@@ -34,6 +34,54 @@ The Desktop app currently supports:
 
 The Web app is deliberately separate from Desktop: it is the foundation for browser/cloud workflows, a cloud memory vault, task and approval views, connector management, and DynamoDB-backed records. It does not give the Web app control over the user’s native desktop.
 
+## Built with Codex and GPT-5.6
+
+Codex and GPT-5.6 have two intentionally distinct roles in ADELE: **they accelerated the creation of the product**, and **GPT-5.6 is the Desktop app’s production reasoning component**. In both cases, the team keeps product decisions, source control, and action authority with people and ADELE’s local safety systems.
+
+### From idea to a shippable product
+
+Codex was used as a development collaborator to move from a broad idea—an assistant that can complete work across desktop and browser surfaces—to an implementation that can be reviewed, tested, and packaged. The workflow was deliberately plan-first:
+
+| Stage | How Codex and GPT-5.6 contributed | Durable outcome in this repository |
+| --- | --- | --- |
+| **Ideation and product definition** | Helped turn user journeys, product boundaries, and safety constraints into concrete requirements rather than a single open-ended agent prompt. | The [implementation plan](IMPLEMENTATION_PLAN.md), [Web product contract](B0_ADELE_WEB_PRODUCT_CONTRACT.md), and desktop/browser/cloud boundaries. |
+| **Architecture and delivery planning** | Helped decompose the work into the Electron shell, Python runtime, browser bridge, shared contracts, Web scaffold, packaging, and testable milestones. | The monorepo layout, workspace commands, architecture notes, and shared Zod contracts. |
+| **Implementation and refinement** | Assisted with code exploration, implementation, debugging, documentation, and targeted test work across JavaScript/TypeScript and Python. Repository-level `AGENTS.md` guidance constrains those tasks with paths, commands, privacy requirements, and definition-of-done checks. | The Desktop app, Chrome bridge, Web scaffold, test suite, packaging scripts, and this documentation. |
+| **Validation and release readiness** | Helped focus review on failure modes: authentication, model selection, streaming, cancellation, redaction, and the boundary between reasoning and real-world actions. | A deterministic fake App Server, provider tests, generated protocol schemas, safe execution traces, and explicit packaging steps. |
+
+This was not “prompt once and ship.” Codex was used in a feedback loop: establish the goal and constraints, inspect the relevant code and docs, make a bounded change, run focused verification, review the diff, and iterate. The [Desktop guidance](apps/desktop/AGENTS.md) makes that workflow reproducible for future contributors.
+
+### GPT-5.6 in the running Desktop app
+
+ADELE Desktop uses **ChatGPT sign-in through Codex App Server** as its only supported production LLM route. At launch, the local backend starts one `codex app-server` child process over stdio—not a public HTTP service—and performs account and model discovery. It accepts `gpt-5.6` and, only when necessary, the GPT-5.6 Sol variant; if neither is available, ADELE shows a connection error instead of silently falling back to another provider or model.
+
+For every user request, GPT-5.6 receives a compact task prompt containing the allowed context, plus a screenshot only when the signed-in model supports image input and ADELE has decided that it is appropriate. It reasons about the task, helps form a concise plan, and returns either a user-facing response or a constrained, schema-shaped selection from Adele’s permitted tools. Text streams back to the overlay as it arrives, while the local runtime records only safe trace metadata such as model, reasoning effort, token counts, duration, and outcome.
+
+```text
+User request and local context
+        │
+        ▼
+ADELE agent: plan + permitted tool schema
+        │
+        ▼
+Codex App Server over local stdio ──► GPT-5.6 reasoning and structured response
+        │
+        ▼
+ADELE validates the response ──► approval gate ──► local tool execution ──► verification
+```
+
+GPT-5.6 is therefore the **reasoning layer**, not the automation authority. It cannot directly click, type, send, purchase, delete, read credentials, or bypass a user approval. Adele validates every proposed tool call, applies its local action policy, runs the action through its own registry, and verifies the observable result. Dynamic App Server tools are disabled until they can be routed through those same controls.
+
+### Production guardrails
+
+- **Authentication stays in Codex.** Adele launches a validated HTTPS sign-in URL and receives only sanitized connection state; it does not read `auth.json`, browser cookies, passwords, or ChatGPT tokens.
+- **The model is constrained.** The App Server thread is created with a read-only sandbox, no direct approvals, and developer instructions that limit it to safe plans and tool selections.
+- **Execution is local and observable.** The Python runtime owns the tool registry, approvals, retries, browser/desktop state checks, and visual verification for UI-changing work.
+- **Failures are handled deliberately.** A cancelled, timed-out, or failed model turn is interrupted or reset locally rather than being treated as a successful action.
+- **Sensitive data is minimized.** Raw prompts, responses, screenshots, screenshot paths, private tool arguments, and hidden reasoning are excluded from normal diagnostics. Temporary screenshots used for a turn are removed when that turn ends.
+
+For the implementation-level protocol, model-selection behavior, and the exact test command, see [Codex App Server integration](docs/CODEX_APP_SERVER_INTEGRATION.md) and [Build Week Desktop setup](docs/BUILD_WEEK_DESKTOP_SETUP.md).
+
 ## Architecture
 
 ```text
