@@ -29,3 +29,9 @@ landing/public/downloads/
 # Reference / local-only folders
 click/
 tiptour/
+
+# Desktop generated/local artifacts
+apps/desktop/.test-overlay-transition/
+apps/desktop/build/cache/
+apps/desktop/build/python/
+apps/desktop/release-*/
