@@ -29,6 +29,3 @@ google-cloud-texttospeech>=2.16.0
 # Utilities
 pillow>=10.0.0
 tenacity>=8.0.0
-
-# Database
-pymongo>=4.0.0

@@ -43,6 +43,11 @@ def get_conversations_dir() -> str:
     return os.path.join(get_adele_data_root(), "conversations")
 
 
+def get_traces_dir() -> str:
+    """Local, privacy-safe execution diagnostics (never prompts or screenshots)."""
+    return os.path.join(get_adele_data_root(), "traces")
+
+
 def ensure_adele_data_layout() -> str:
     """
     Create the standard layout under the data root.
@@ -57,6 +62,7 @@ def ensure_adele_data_layout() -> str:
         "milestones",
         "memories",
         "conversations",
+        "traces",
     )
     for name in subs:
         os.makedirs(os.path.join(root, name), exist_ok=True)
