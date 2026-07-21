@@ -75,3 +75,33 @@ def is_browser_chrome_action(text: str) -> bool:
             "last",
         )
     )
+
+
+def is_browser_tab_query(text: str) -> bool:
+    """Return true for read-only questions about the user's browser tabs.
+
+    These requests must not be treated as requests to launch Chrome. Keeping
+    this predicate narrow avoids changing normal browser navigation commands
+    such as "open a new tab" or "switch to my second tab".
+    """
+    normalized = normalize_phrase(text)
+    if "tab" not in normalized:
+        return False
+
+    browser_markers = ("chrome", "google chrome", "browser")
+    if not any(marker in normalized for marker in browser_markers):
+        return False
+
+    action_markers = (
+        "open chrome", "launch chrome", "start chrome", "switch to", "go to",
+        "open a new tab", "open new tab", "close tab", "reopen tab", "duplicate tab",
+        "next tab", "previous tab", "first tab", "last tab",
+    )
+    if any(marker in normalized for marker in action_markers):
+        return False
+
+    query_markers = (
+        "how many", "number of", "count", "list", "show", "which",
+        "what tabs", "what are my tabs", "tell me my tabs",
+    )
+    return any(marker in normalized for marker in query_markers)
