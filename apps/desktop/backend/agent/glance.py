@@ -193,7 +193,7 @@ class ScreenGlance:
         return result
 
     async def deep_look(self, question: str = "") -> GlanceResult:
-        """Full screenshot + Gemma 4 vision analysis.
+        """Full screenshot + active ChatGPT vision analysis.
 
         Cost: ~2-4 seconds, ~500 tokens.
         Budget: Capped at {deep_look_budget} per task.

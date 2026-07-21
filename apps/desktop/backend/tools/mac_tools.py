@@ -16,6 +16,7 @@ import time
 import base64
 import hashlib
 import json
+import re
 from typing import Optional
 
 try:
@@ -229,18 +230,26 @@ def _escape_applescript_string(value: str) -> str:
     return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
-async def _activate_target_app(app_name: str) -> None:
+async def _activate_target_app(app_name: str) -> bool:
     target_name = (app_name or "").strip()
     if not target_name:
-        return
+        return True
+    if os.name == "nt":
+        try:
+            from windows_desktop import focus_app
+
+            return await focus_app(target_name)
+        except Exception:
+            return False
     resolved_name = await _match_installed_app_name(target_name)
     launch_name = resolved_name or next(iter(_candidate_app_names(target_name)), target_name)
     safe_name = _escape_applescript_string(launch_name)
     try:
-        await _osascript(f'tell application "{safe_name}" to activate')
+        result = await _osascript(f'tell application "{safe_name}" to activate')
         await asyncio.sleep(0.1)
+        return "error" not in str(result or "").lower()
     except Exception:
-        return
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -382,18 +391,42 @@ async def quit_app(app_name: str) -> str:
         target = (app_name or "").strip()
         if not target:
             return "ERROR: app_name is required."
+        image_name = target if target.lower().endswith(".exe") else f"{target}.exe"
+
+        async def _is_running() -> bool:
+            checker = await asyncio.create_subprocess_exec(
+                "tasklist",
+                "/FI",
+                f"IMAGENAME eq {image_name}",
+                "/NH",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(checker.communicate(), timeout=5.0)
+            listing = stdout.decode("utf-8", "ignore").lower()
+            return image_name.lower() in listing
+
         try:
+            if not await _is_running():
+                return f"{target} is already closed."
             proc = await asyncio.create_subprocess_exec(
                 "taskkill",
                 "/IM",
-                f"{target}.exe" if not target.lower().endswith(".exe") else target,
+                image_name,
                 "/T",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             if proc.returncode == 0:
-                return f"Quit {target}."
+                # taskkill may report a successful request before an Electron
+                # process tree has actually exited.  Never claim completion
+                # until the named executable is gone.
+                for _ in range(10):
+                    await asyncio.sleep(0.15)
+                    if not await _is_running():
+                        return f"Quit {target}."
+                return f"Could not quit {target}: process is still running."
             err = stderr.decode("utf-8", "ignore").strip()
             return f"Could not quit {target}: {err[:200] or 'process not found'}"
         except Exception as exc:
@@ -518,14 +551,21 @@ async def web_search(query: str) -> str:
             "text": {
                 "type": "string",
                 "description": "The text to type"
+            },
+            "app_name": {
+                "type": "string",
+                "description": "Optional app to bring to the foreground before typing"
             }
         },
         "required": ["text"]
     }
 )
-async def type_text(text: str) -> str:
+async def type_text(text: str, app_name: str = "") -> str:
     if not text:
         return "No text provided to type."
+
+    if app_name and not await _activate_target_app(app_name):
+        return f"Failed to focus target app '{app_name}' before typing."
 
     if os.name == "nt":
         try:
@@ -1467,10 +1507,12 @@ async def _fast_visual_locate(
     description: str,
     hint: str = "",
 ) -> Optional[tuple]:
-    """Find a UI element visually using Gemini fast tier (~3-5 s).
+    """Find a UI element with Adele's active ChatGPT vision session.
 
-    Captures a screenshot, sends it to the *Flash* model with a focused
-    prompt asking only for the element's (x, y) centre coordinates.
+    UI Automation and browser DOM selectors remain the preferred routes. This
+    helper is only the consent-bound visual fallback when those selectors do
+    not expose the target. It reuses the task's Codex App Server provider;
+    it never creates a separate model client or reads a separate credential.
 
     Returns
     -------
@@ -1478,6 +1520,22 @@ async def _fast_visual_locate(
 
     Cost: ~860 tokens (image + short prompt) at Flash pricing — negligible.
     """
+    from agent.vision_harness import analyze_screen
+
+    target_context = f" Context: {hint}." if hint else ""
+    answer = await analyze_screen(
+        "Locate the center of the visible UI target described as "
+        f"'{description}'.{target_context} "
+        "Return exactly one coordinate in the form (x, y), or say it is not visible."
+    )
+    match = re.search(r"\(\s*(\d{1,5})\s*,\s*(\d{1,5})\s*\)", answer)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None
+
+    # Legacy Gemini implementation retained below for source compatibility
+    # only. It is unreachable and will be removed after the Windows harness
+    # migration.
     global _display_origin
 
     screenshot_dir = _screenshot_work_dir()
@@ -1605,7 +1663,7 @@ async def _fast_visual_locate(
 
 @registry.register(
     name="read_screen",
-    description="Take a screenshot and analyze what's visible on screen using AI vision. Returns a description of the screen contents, including text, UI elements, buttons, and layout. Use when you need to understand what the user is looking at, read error messages, or identify clickable elements.",
+    description="Take a temporary screenshot and analyze it through Adele's active ChatGPT vision session. Returns visible screen content only. Use after UI Automation cannot provide the needed visual evidence.",
     parameters={
         "type": "object",
         "properties": {
@@ -1618,6 +1676,17 @@ async def _fast_visual_locate(
     }
 )
 async def read_screen(question: str = "") -> str:
+    """Analyze a capture through Adele's active ChatGPT vision harness.
+
+    The harness binds the request's existing Codex App Server provider, so this
+    tool never initializes a second model client or reads a separate API key.
+    """
+    from agent.vision_harness import analyze_screen
+
+    return await analyze_screen(question)
+
+    # Legacy implementation retained below for source compatibility only. It
+    # is unreachable and will be removed after the Windows harness migration.
     global _display_origin, _screen_cache
     # Capture screenshot
     screenshot_dir = _screenshot_work_dir()

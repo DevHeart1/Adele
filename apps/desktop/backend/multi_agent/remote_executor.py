@@ -77,7 +77,11 @@ class RemoteExecutor:
         Returns:
             SubAgentResult with deliverables and status.
         """
-        self._start_time = time.time()
+        # Wall-clock time can have coarse resolution (and can move backwards),
+        # which made an otherwise successful placeholder run report 0.0s on
+        # Windows. A monotonic high-resolution clock keeps result telemetry
+        # truthful without changing timeout behaviour.
+        self._start_time = time.perf_counter()
         deliverables = dict(parent_deliverables or {})
         completed = 0
         failed = 0
@@ -98,11 +102,11 @@ class RemoteExecutor:
                     milestones_completed=completed,
                     milestones_failed=failed,
                     total_actions=total_actions,
-                    duration_seconds=time.time() - self._start_time,
+                    duration_seconds=max(time.perf_counter() - self._start_time, 1e-9),
                 )
 
             # Check timeout
-            elapsed = time.time() - self._start_time
+            elapsed = time.perf_counter() - self._start_time
             if elapsed > self.timeout_seconds:
                 print(
                     f"[RemoteExecutor:{self.agent_id}] Timeout after "
@@ -177,7 +181,7 @@ class RemoteExecutor:
                     f"exception: {e}"
                 )
 
-        duration = time.time() - self._start_time
+        duration = max(time.perf_counter() - self._start_time, 1e-9)
         status = (
             SubAgentStatus.COMPLETED if failed == 0
             else SubAgentStatus.FAILED

@@ -5,6 +5,7 @@ Tracks extension connection state and queued browser actions.
 """
 
 import asyncio
+import json
 import os
 import secrets
 import time
@@ -23,7 +24,7 @@ class BrowserBridge:
 
     def __init__(self):
         configured = os.environ.get("ADELE_BROWSER_BRIDGE_TOKEN", "").strip()
-        self._session_token = configured or "dev-bridge-token"
+        self._session_token = configured or secrets.token_urlsafe(32)
         self._connected_session_id: Optional[str] = None
         self._last_seen_at: float = 0.0
         self._pending_actions: List[ActionRequest] = []
@@ -33,6 +34,7 @@ class BrowserBridge:
         # Event-driven signaling — callers await these instead of polling
         self._result_events: Dict[str, asyncio.Event] = {}
         self._snapshot_event: asyncio.Event = asyncio.Event()
+        self._tab_inventory_event: asyncio.Event = asyncio.Event()
         self._event_loop = None
         self._snapshot_generation: int = 0
         self._extension_ws = None  # WebSocket to the extension for push
@@ -101,6 +103,40 @@ class BrowserBridge:
         self._snapshot_generation = getattr(snapshot, "generation", 0)
         self._snapshot_event.set()
         self._snapshot_event = asyncio.Event()  # Reset for next waiter
+
+    def register_tab_inventory(self, tabs: List[dict], session_id: str) -> None:
+        """Store a complete extension-reported tab inventory for a session."""
+        self._ensure_loop_events()
+        resolved_session_id = str(session_id or self._connected_session_id or "").strip()
+        if not resolved_session_id:
+            return
+        browser_store.replace_session_tabs(list(tabs or []), resolved_session_id)
+        self._last_seen_at = time.time()
+        self._tab_inventory_event.set()
+        self._tab_inventory_event = asyncio.Event()
+
+    async def request_tab_inventory(self) -> bool:
+        """Ask the connected extension for a fresh, read-only tab inventory."""
+        if not self.is_connected() or self._extension_ws is None:
+            return False
+        try:
+            await self._extension_ws.send(json.dumps({
+                "type": "browser_tab_inventory_request",
+                "session_id": self._connected_session_id or "",
+            }))
+            return True
+        except Exception:
+            return False
+
+    async def wait_for_tab_inventory(self, timeout: float = 1.0) -> bool:
+        """Wait briefly for an inventory response without launching a browser."""
+        self._ensure_loop_events()
+        event = self._tab_inventory_event
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.05, timeout))
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def queue_action(self, request: ActionRequest) -> ActionResult:
         self._ensure_loop_events()
@@ -327,6 +363,7 @@ class BrowserBridge:
         self._latest_dom_change_by_action_id.clear()
         self._result_events.clear()
         self._snapshot_event = asyncio.Event()
+        self._tab_inventory_event = asyncio.Event()
         self._snapshot_generation = 0
         self._extension_name = ""
         runtime_state_store.mark_browser_disconnected()

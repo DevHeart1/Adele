@@ -209,6 +209,32 @@ def _screenshot_capture_dir() -> str:
         return SCREENSHOT_DIR_LEGACY
 
 
+def is_temporary_screenshot(path: Optional[str]) -> bool:
+    """Return whether a path is an ADELE-created PNG capture."""
+    if not path:
+        return False
+    try:
+        capture_dir = os.path.realpath(_screenshot_capture_dir())
+        candidate = os.path.realpath(path)
+        return (
+            os.path.commonpath([capture_dir, candidate]) == capture_dir
+            and candidate.lower().endswith(".png")
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def delete_temporary_screenshot(path: Optional[str]) -> None:
+    """Delete only an ADELE-created PNG capture, never an arbitrary file."""
+    if not is_temporary_screenshot(path):
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
 async def capture_screenshot() -> Optional[str]:
     shot_dir = _screenshot_capture_dir()
     os.makedirs(shot_dir, exist_ok=True)
@@ -220,7 +246,11 @@ async def capture_screenshot() -> Optional[str]:
 
             await capture_windows_screenshot(filepath)
             return filepath if os.path.exists(filepath) else None
+        except asyncio.CancelledError:
+            delete_temporary_screenshot(filepath)
+            raise
         except Exception:
+            delete_temporary_screenshot(filepath)
             return None
 
     try:
@@ -236,8 +266,11 @@ async def capture_screenshot() -> Optional[str]:
         await asyncio.wait_for(proc.communicate(), timeout=5.0)
         if os.path.exists(filepath):
             return filepath
+    except asyncio.CancelledError:
+        delete_temporary_screenshot(filepath)
+        raise
     except Exception:
-        pass
+        delete_temporary_screenshot(filepath)
     return None
 
 

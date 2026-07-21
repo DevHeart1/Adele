@@ -35,6 +35,9 @@ for _stream in (sys.stdout, sys.stderr):
 print = partial(print, flush=True)
 
 AGENT_TEXT_TIMEOUT_SECONDS = int(os.getenv("ADELE_AGENT_TEXT_TIMEOUT_SECONDS", "180"))
+BACKEND_HOST = os.getenv("ADELE_BACKEND_HOST", "127.0.0.1")
+BACKEND_PORT = int(os.getenv("ADELE_BACKEND_PORT", "8000"))
+BACKEND_OWNER_ID = os.getenv("ADELE_BACKEND_OWNER_ID", "")
 
 # Ensure the backend package root is on sys.path so 'agent', 'tools', etc. resolve
 # regardless of the working directory (Electron launches with cwd = project root).
@@ -222,7 +225,6 @@ class VoiceAssistant:
                 print("[Voice] WARN pvporcupine not available - wake word disabled")
             elif not PICOVOICE_ACCESS_KEY or PICOVOICE_ACCESS_KEY == "YOUR_PICOVOICE_ACCESS_KEY_HERE":
                 print("[Voice] WARN Picovoice Access Key not set — wake word disabled")
-                print(f"[Voice]   PICOVOICE_ACCESS_KEY = '{PICOVOICE_ACCESS_KEY[:8]}…' (len={len(PICOVOICE_ACCESS_KEY)})")
             else:
                 # Look for the .ppn file in the project root (one level above _backend_dir)
                 project_root = os.path.abspath(os.path.join(_backend_dir, ".."))
@@ -231,7 +233,6 @@ class VoiceAssistant:
                 servers_ppn = os.path.join(os.path.dirname(__file__), "hey_adele.ppn")
                 ppn_path = custom_ppn if os.path.exists(custom_ppn) else (servers_ppn if os.path.exists(servers_ppn) else None)
 
-                print(f"[Voice] Picovoice key: {PICOVOICE_ACCESS_KEY[:12]}… (len={len(PICOVOICE_ACCESS_KEY)})")
                 print(f"[Voice] PPn search: project_root={custom_ppn} exists={os.path.exists(custom_ppn)}")
                 print(f"[Voice] PPn search: servers_dir={servers_ppn} exists={os.path.exists(servers_ppn)}")
 
@@ -281,6 +282,10 @@ class VoiceAssistant:
     async def run_agent_text(self, websocket, text: str):
         print(f"=> INPUT: {text}")
         task_id = f"task-{uuid.uuid4().hex[:10]}"
+        # A new request must always clear the cancellation state of a prior
+        # task. Without this, interrupting a spoken response leaves the next
+        # approved plan marked cancelled before it can act.
+        runtime_state_store.start_request(request_id=task_id, query=text)
         self._active_task_id = task_id
         self._active_task = asyncio.current_task()
         await websocket.send(json.dumps({
@@ -304,6 +309,19 @@ class VoiceAssistant:
         set_tool_run_context(task_id, ws_callback)
 
         try:
+            router_status = self.agent.router.status()
+            if not isinstance(router_status, dict):
+                router_status = {}
+            auth_state = router_status.get("auth") or {}
+            if not isinstance(auth_state, dict):
+                auth_state = {}
+            await ws_callback({
+                "type": "model_trace",
+                "provider": router_status.get("provider", "ChatGPT via Codex App Server"),
+                "model": router_status.get("model", "gpt-5.6"),
+                "reasoning": auth_state.get("reasoningEffort") or "medium",
+                "status": auth_state.get("state") or "STARTING_RUNTIME",
+            })
             if _is_cursor_demo_request(text):
                 await ws_callback({
                     "type": "tool_event",
@@ -346,11 +364,6 @@ class VoiceAssistant:
                     "tool": "read_screen",
                     "variant": "",
                 })
-                # Simulate a screenshot vision description
-                from agent.memory import get_mongo_db
-                db = get_mongo_db()
-                mongo_status = "Connected & Active" if db is not None else "Local fallback (offline)"
-                
                 await asyncio.sleep(1.5)
                 
                 description = (
@@ -358,7 +371,7 @@ class VoiceAssistant:
                     "All core modules are verified: "
                     "Screen capture is active, "
                     "Microphone access is verified, "
-                    f"MongoDB memory is {mongo_status}, "
+                    "local memory files are ready, "
                     "and the global shortcut is registered. "
                     "Everything is ready for use!"
                 )
@@ -542,8 +555,8 @@ class VoiceAssistant:
         """Cancel the currently running agent task."""
         ws = websocket or self._active_websocket
         print("[Backend] ⛔ Cancelling active task")
-        runtime_state_store.cancel_request()
         cancelled_task_id = self._active_task_id
+        runtime_state_store.cancel_request(request_id=cancelled_task_id or "")
         self._active_task_id = None
         set_tool_run_context("", None)
 
@@ -784,9 +797,13 @@ class VoiceAssistant:
                 #  AGENTIC PIPELINE — This is where the magic happens
                 # ════════════════════════════════════════════
                 
-                await self.run_agent_text(websocket, text)
-                if self.state != "IDLE":
-                    return
+                # Voice commands use the same cancellable, time-bounded task
+                # runner as typed requests.  Calling run_agent_text directly
+                # here could leave the microphone handler blocked forever when
+                # a UI lookup or model turn stalled, so later "proceed" and
+                # cancel requests appeared to do nothing.
+                await self.start_agent_text_task(websocket, text, "voice_command")
+                return
                 
             except sr.UnknownValueError:
                 print("Speech-to-text could not understand audio")
@@ -852,18 +869,39 @@ class VoiceAssistant:
         self.audio_buffer = bytearray()
 
 
+_shared_assistant = None
+
+
 async def main_handler(websocket):
+    global _shared_assistant
     print("Electron App Connected!")
-    assistant = VoiceAssistant()
+    # Keep the single Codex App Server process alive across renderer reconnects.
+    if _shared_assistant is None:
+        _shared_assistant = VoiceAssistant()
+    assistant = _shared_assistant
     assistant._active_websocket = websocket
-    try:
-        await assistant.agent.router.initialize()
-    except Exception as e:
-        print(f"[Server] Router initialize failed: {e}")
+
+    async def initialize_router_in_background():
+        """Warm Codex without holding up the desktop's first render."""
+        try:
+            await assistant.agent.router.initialize()
+            auth = assistant.agent.router.auth
+            if auth:
+                await _send_json(websocket, {
+                    "type": "codex_auth_state",
+                    "state": auth.snapshot.public(),
+                })
+        except Exception as e:
+            print(f"[Server] Router initialize failed: {e}")
 
     # Initialize UI
     try:
-        await websocket.send(json.dumps({"type": "status", "state": "state-idle"}))
+        await websocket.send(json.dumps({
+            "type": "status",
+            "state": "state-idle",
+            "backendOwnerId": BACKEND_OWNER_ID,
+        }))
+        asyncio.create_task(initialize_router_in_background())
         
         async for message in websocket:
             try:
@@ -878,6 +916,45 @@ async def main_handler(websocket):
                     await assistant.stop_push_to_talk(websocket)
                 elif msg_type == "cancel_task":
                     await assistant.cancel_active_task(websocket)
+                elif msg_type == "codex_auth_status":
+                    await assistant.agent.router.initialize()
+                    auth = assistant.agent.router.auth
+                    state = await auth.check() if auth else None
+                    await websocket.send(json.dumps({
+                        "type": "codex_auth_state",
+                        "state": state.public() if state else {"state": "ERROR", "errorCode": "runtime_error"},
+                    }))
+                elif msg_type == "codex_auth_login":
+                    await assistant.agent.router.initialize()
+                    auth = assistant.agent.router.auth
+                    result = await auth.start_login(device_code=bool(data.get("device_code"))) if auth else {"type": "error", "errorCode": "runtime_error"}
+                    await websocket.send(json.dumps({
+                        "type": "codex_auth_login_result",
+                        "result": result,
+                    }))
+                    if auth:
+                        await websocket.send(json.dumps({"type": "codex_auth_state", "state": auth.snapshot.public()}))
+                        if result.get("type") in {"chatgpt", "chatgptDeviceCode"}:
+                            async def refresh_after_login():
+                                # Codex owns the browser callback; poll only the
+                                # sanitized account/read state until completion.
+                                for _ in range(120):
+                                    await asyncio.sleep(1)
+                                    state = await auth.check()
+                                    await _send_json(websocket, {"type": "codex_auth_state", "state": state.public()})
+                                    if state.state in {"READY", "ERROR", "RUNTIME_MISSING"}:
+                                        return
+                            asyncio.create_task(refresh_after_login())
+                elif msg_type == "codex_auth_cancel":
+                    await assistant.agent.router.initialize()
+                    auth = assistant.agent.router.auth
+                    state = await auth.cancel_login() if auth else None
+                    await websocket.send(json.dumps({"type": "codex_auth_state", "state": state.public() if state else {"state": "SIGNED_OUT"}}))
+                elif msg_type == "codex_auth_logout":
+                    await assistant.agent.router.initialize()
+                    auth = assistant.agent.router.auth
+                    state = await auth.logout() if auth else None
+                    await websocket.send(json.dumps({"type": "codex_auth_state", "state": state.public() if state else {"state": "SIGNED_OUT"}}))
                 elif msg_type == "toggle_conversation_mode":
                     enabled = assistant.toggle_conversation_mode()
                     await websocket.send(json.dumps({
@@ -899,100 +976,10 @@ async def main_handler(websocket):
                             "type": "status", "state": "state-idle"
                         }))
                 elif msg_type == "test_gemini":
-                    api_key = (data.get("api_key") or "").strip()
-                    success = False
-                    error = ""
-                    if not api_key:
-                        error = "Gemini API key is required"
-                    else:
-                        async def _test_gemini_connection():
-                            from google import genai
-                            from google.genai import types
-                            from providers.gemini import DEFAULT_GEMINI_MODEL
-
-                            client = genai.Client(api_key=api_key)
-                            response = await client.aio.models.generate_content(
-                                model=DEFAULT_GEMINI_MODEL,
-                                contents="Reply with exactly: ok",
-                                config=types.GenerateContentConfig(
-                                    thinking_config=types.ThinkingConfig(thinking_level="LOW"),
-                                    tools=[
-                                        types.Tool(google_search=types.GoogleSearch()),
-                                        types.Tool(code_execution=types.ToolCodeExecution()),
-                                        types.Tool(url_context=types.UrlContext()),
-                                    ],
-                                ),
-                            )
-                            text = ""
-                            if response.candidates and response.candidates[0].content:
-                                for part in response.candidates[0].content.parts or []:
-                                    if getattr(part, "text", None):
-                                        text += part.text
-                            if not text.strip():
-                                raise RuntimeError("Gemini returned an empty test response")
-
-                        try:
-                            await _test_gemini_connection()
-                            success = True
-                        except Exception as e:
-                            error = str(e)
                     await websocket.send(json.dumps({
                         "type": "test_gemini_result",
-                        "success": success,
-                        "error": error,
-                    }))
-                elif msg_type == "test_mongodb":
-                    uri = data.get("uri", "")
-                    db_name = data.get("db", "") or "adele"
-                    success = False
-                    error = ""
-                    from agent.memory import PYMONGO_AVAILABLE
-                    if not PYMONGO_AVAILABLE:
-                        error = "pymongo is not installed in the Python environment"
-                    elif not uri:
-                        error = "MongoDB URI is required"
-                    else:
-                        def _test_mongodb_connection():
-                            from pymongo import MongoClient
-                            client = MongoClient(uri, serverSelectionTimeoutMS=30000)
-                            client.admin.command("ping")
-
-                        try:
-                            await asyncio.to_thread(_test_mongodb_connection)
-                            success = True
-                        except Exception as e:
-                            error = str(e)
-                    await websocket.send(json.dumps({
-                        "type": "test_mongodb_result",
-                        "success": success,
-                        "error": error
-                    }))
-                elif msg_type == "create_mongodb_collections":
-                    uri = data.get("uri", "")
-                    db_name = data.get("db", "") or "adele"
-                    success = False
-                    error = ""
-                    from agent.memory import PYMONGO_AVAILABLE, _initialize_mongo_collections
-                    if not PYMONGO_AVAILABLE:
-                        error = "pymongo is not installed in the Python environment"
-                    elif not uri:
-                        error = "MongoDB URI is required"
-                    else:
-                        def _create_mongodb_collections():
-                            from pymongo import MongoClient
-                            client = MongoClient(uri, serverSelectionTimeoutMS=30000)
-                            db = client[db_name]
-                            _initialize_mongo_collections(db)
-
-                        try:
-                            await asyncio.to_thread(_create_mongodb_collections)
-                            success = True
-                        except Exception as e:
-                            error = str(e)
-                    await websocket.send(json.dumps({
-                        "type": "create_mongodb_collections_result",
-                        "success": success,
-                        "error": error
+                        "success": False,
+                        "error": "Gemini is inactive. Adele requires ChatGPT through Codex.",
                     }))
                 elif msg_type == "tts_done":
                     # Renderer finished playing all TTS audio
@@ -1502,17 +1489,12 @@ async def main():
         print("backend_server.py to enable the wake word.")
         print("!" * 60)
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if not gemini_key:
-        print("!" * 60)
-        print("NOTE: GEMINI_API_KEY not set. Agent will run in fallback mode.")
-        print("Set it with: export GEMINI_API_KEY='your-key-here'")
-        print("!" * 60)
+    print("[Codex] ChatGPT authentication is managed by Codex App Server.")
         
     async with websockets.serve(
         main_handler,
-        "127.0.0.1",
-        8000,
+        BACKEND_HOST,
+        BACKEND_PORT,
         origins=None,
         ping_interval=120,
         ping_timeout=600,
@@ -1525,7 +1507,7 @@ async def main():
             ping_interval=120,
             ping_timeout=600,
         ):
-            print("Server running on ws://127.0.0.1:8000 (Allow All Origins)")
+            print(f"Server running on ws://{BACKEND_HOST}:{BACKEND_PORT} (Allow All Origins)")
             print(f"Browser bridge running on ws://{BRIDGE_HOST}:{BRIDGE_PORT}")
             print("[Backend] READY")
             await asyncio.Future()

@@ -67,7 +67,14 @@ body.assistant-overlay-mode .stage {
 }
 
 body.assistant-overlay-mode .glass-pill {
-  display: none;
+  /*
+   * The desktop window is transparent and click-through outside interactive
+   * controls.  Hiding the pill therefore turns a successfully launched
+   * Adele instance into an invisible full-screen window whenever the helper
+   * cursor is idle.  Keep the compact status pill visible as the reliable
+   * launch affordance; only the empty area remains click-through.
+   */
+  display: flex;
 }
 
 body.normal-window-mode .app-titlebar {

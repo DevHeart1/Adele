@@ -32,6 +32,12 @@ class LLMResponse:
     error: Optional[str] = None
     # Raw model response parts - needed for provider-specific thought signatures
     raw_model_parts: Optional[list] = None
+    # Safe metadata for the execution trace. Never populate with raw prompts,
+    # auth data, screenshots, or hidden reasoning content.
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    usage: Optional[dict] = None
+    trace: Optional[dict] = None
 
     @property
     def has_tool_calls(self) -> bool:

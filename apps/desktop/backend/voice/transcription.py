@@ -15,6 +15,8 @@ import speech_recognition as sr
 print = partial(print, flush=True)
 
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+DEFAULT_ELEVENLABS_STT_LANGUAGE_CODE = "eng"
+DEFAULT_GOOGLE_STT_LANGUAGE_CODE = "en-US"
 
 
 def stt_backend() -> str:
@@ -60,11 +62,17 @@ def _extract_scribe_text(payload: dict) -> str:
 
 async def _elevenlabs_scribe(wav_bytes: bytes, api_key: str) -> str:
     model_id = (os.environ.get("ADELE_STT_MODEL_ID") or "scribe_v2").strip()
-    lang = (os.environ.get("ADELE_STT_LANGUAGE_CODE") or "").strip()
+    # Scribe auto-detection can select an unrelated language from short or
+    # noisy desktop audio. Adele is English-first unless the user deliberately
+    # configures a supported Scribe language code in their environment.
+    lang = (os.environ.get("ADELE_STT_LANGUAGE_CODE") or DEFAULT_ELEVENLABS_STT_LANGUAGE_CODE).strip()
 
-    data = {"model_id": model_id, "tag_audio_events": "false", "timestamps_granularity": "none"}
-    if lang:
-        data["language_code"] = lang
+    data = {
+        "model_id": model_id,
+        "tag_audio_events": "false",
+        "timestamps_granularity": "none",
+        "language_code": lang,
+    }
 
     headers = {"xi-api-key": api_key}
     timeout = float(os.environ.get("ADELE_STT_TIMEOUT", "120") or 120)
@@ -104,6 +112,7 @@ async def transcribe_wav_bytes(wav_bytes: bytes, recognizer: sr.Recognizer) -> s
     def _google_sync() -> str:
         with sr.AudioFile(io.BytesIO(wav_bytes)) as source:
             audio_data = recognizer.record(source)
-        return recognizer.recognize_google(audio_data)
+        language = (os.environ.get("ADELE_GOOGLE_STT_LANGUAGE_CODE") or DEFAULT_GOOGLE_STT_LANGUAGE_CODE).strip()
+        return recognizer.recognize_google(audio_data, language=language)
 
     return await loop.run_in_executor(None, _google_sync)

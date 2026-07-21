@@ -14,7 +14,7 @@ from typing import Iterable, List, Set, Dict, Optional
 from functools import partial
 from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
-from agent.browser_intent_utils import is_browser_chrome_action
+from agent.browser_intent_utils import is_browser_chrome_action, is_browser_tab_query
 from browser.interpreter_ai import (
     BrowserInterpretationError,
     summarize_scraped_page_with_flash,
@@ -34,6 +34,50 @@ print = partial(print, flush=True)
 
 def _norm_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def is_time_sensitive_information_request(user_request: str) -> bool:
+    """Recognize factual questions that must be grounded in fresh web data.
+
+    These requests are read-only, so this only changes the available research
+    surface.  It does not open a browser, bypass approvals, or grant desktop
+    control.  The model still has to use Adele's registered, verified web tool.
+    """
+    text = _norm_text(user_request)
+    if not text:
+        return False
+
+    asks_for_facts = any(marker in text for marker in (
+        "who", "what", "when", "where", "which", "how many", "list ",
+        "give me", "tell me", "show me", "players", "roster",
+    ))
+    if not asks_for_facts:
+        return False
+
+    # Tournament squads and results are a time-sensitive source even when a
+    # user does not explicitly say "latest".  Treat them as research instead
+    # of relying on a model's static knowledge.
+    if any(marker in text for marker in (
+        "world cup", "olympics", "champions league", "premier league",
+        "nba finals", "super bowl",
+    )):
+        return True
+
+    freshness_markers = (
+        "today", "yesterday", "tomorrow", "current", "currently", "latest",
+        "recent", "right now", "this week", "this month", "this year",
+        "just ended", "ended yesterday", "newly", "now",
+    )
+    live_subjects = (
+        "score", "scores", "result", "results", "standings", "fixture",
+        "schedule", "lineup", "roster", "player", "players", "team",
+        "news", "headline", "price", "stock", "weather", "forecast",
+        "election", "availability", "release date",
+    )
+    return (
+        any(marker in text for marker in freshness_markers)
+        and any(marker in text for marker in live_subjects)
+    )
 
 
 def _is_mixed_local_workflow(text: str, context_app: str = "") -> bool:
@@ -1866,6 +1910,19 @@ class ToolSelector:
         Returns:
             List of relevant tool names
         """
+        # A tab count/list is a browser-state query. Do not let the mention of
+        # Chrome pull ``open_app`` into the request scope: that caused read-only
+        # questions to focus or launch Chrome instead of inspecting the browser.
+        if is_browser_tab_query(user_request):
+            available_tools = self._get_all_tools()
+            tab_query_tools = [
+                tool
+                for tool in ("send_response", "await_reply", "browser_list_tabs")
+                if tool in available_tools
+            ]
+            print("[ToolSelector] Browser tab query: browser_list_tabs only")
+            return tab_query_tools
+
         if _looks_like_generic_media_open(
             user_request,
             intent_action=intent_action,
@@ -1925,6 +1982,12 @@ class ToolSelector:
         for category, triggers in CATEGORY_TRIGGERS.items():
             if any(trigger in combined_text for trigger in triggers):
                 matched_categories.add(category)
+
+        # Current factual questions need sources, not a generic answer or an
+        # app-control fallback.  This covers, for example, a World Cup squad
+        # requested immediately after the tournament has ended.
+        if is_time_sensitive_information_request(user_request):
+            matched_categories.add("RESEARCH")
         
         # ── Smart routing: prefer accessibility-based tools over vision ──
         # When the user wants to INTERACT (click, type, fill), give them the

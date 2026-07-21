@@ -62,12 +62,14 @@ async def _capture_screen_hash() -> tuple[str, str]:
             gray = img.convert("L").resize((8, 8))
             pixels = list(gray.getdata())
         if not pixels:
-            return "", screenshot_path
+            return "", ""
         avg = sum(pixels) / len(pixels)
         bits = "".join("1" if px >= avg else "0" for px in pixels)
-        return f"{int(bits, 2):016x}", screenshot_path
+        return f"{int(bits, 2):016x}", ""
     except Exception:
-        return "", screenshot_path
+        return "", ""
+    finally:
+        _delete_temporary_screenshot(screenshot_path)
 
 
 def _screenshot_capture_dir() -> str:
@@ -99,8 +101,29 @@ async def _capture_screenshot() -> str:
         )
         await asyncio.wait_for(proc.communicate(), timeout=5.0)
         return filepath if os.path.exists(filepath) else ""
+    except asyncio.CancelledError:
+        _delete_temporary_screenshot(filepath)
+        raise
     except Exception:
+        _delete_temporary_screenshot(filepath)
         return ""
+
+
+def _delete_temporary_screenshot(path: str) -> None:
+    """Delete only PNG files created in Adele's screenshot directory."""
+    if not path:
+        return
+    try:
+        capture_dir = os.path.realpath(_screenshot_capture_dir())
+        candidate = os.path.realpath(path)
+        if (
+            os.path.commonpath([capture_dir, candidate]) == capture_dir
+            and candidate.lower().endswith(".png")
+            and os.path.isfile(candidate)
+        ):
+            os.remove(candidate)
+    except (OSError, ValueError):
+        pass
 
 
 def _hamming_distance(left: str, right: str) -> int:
@@ -176,7 +199,7 @@ async def verify_post_action_change(
 
     if settle_delay > 0:
         await asyncio.sleep(settle_delay)
-    after_hash, screenshot_path = await _capture_screen_hash()
+    after_hash, _ = await _capture_screen_hash()
     hamming = _hamming_distance(context.screen_hash, after_hash)
     changed = bool(context.screen_hash and after_hash and hamming >= 6)
     if changed:
@@ -188,7 +211,6 @@ async def verify_post_action_change(
                 "before_hash": context.screen_hash,
                 "after_hash": after_hash,
                 "hamming": hamming,
-                "screenshot_path": screenshot_path,
             },
         )
     return ActionVerificationResult(
@@ -199,7 +221,6 @@ async def verify_post_action_change(
             "before_hash": context.screen_hash,
             "after_hash": after_hash,
             "hamming": hamming,
-            "screenshot_path": screenshot_path,
         },
     )
 

@@ -135,8 +135,8 @@ class BrowserStore:
             return None
         return max(matches, key=lambda t: t.last_seen)
 
-    def register_external_tabs(self, tabs: List[Dict]) -> None:
-        """Bulk-register tabs from an external source (e.g., AppleScript tab query)."""
+    def register_external_tabs(self, tabs: List[Dict], session_id: str = "") -> None:
+        """Bulk-register tabs from an external source (e.g., the extension)."""
         for t in tabs:
             tab_id = str(t.get("tab_id", t.get("index", "")))
             url = t.get("url", "")
@@ -150,7 +150,18 @@ class BrowserStore:
                 self._tabs[tab_id] = TabInfo(
                     tab_id=tab_id, url=url, title=title,
                     domain=domain, last_seen=time.time(),
+                    session_id=str(t.get("session_id", session_id) or ""),
                 )
+
+    def replace_session_tabs(self, tabs: List[Dict], session_id: str) -> None:
+        """Atomically reconcile a complete tab inventory for one bridge session."""
+        resolved_session_id = str(session_id or "").strip()
+        if not resolved_session_id:
+            return
+        for tab_id, tab in list(self._tabs.items()):
+            if tab.session_id == resolved_session_id:
+                self._tabs.pop(tab_id, None)
+        self.register_external_tabs(tabs, session_id=resolved_session_id)
 
     def remove_tab(self, tab_id: str) -> None:
         self._tabs.pop(tab_id, None)

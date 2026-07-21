@@ -11,6 +11,9 @@ directories:
   output: release
 
 asar: true
+# Native key-listener executables must remain outside app.asar on Windows.
+asarUnpack:
+  - node_modules/node-global-key-listener/**
 
 afterPack: scripts/stamp-windows-icon.cjs
 afterSign: build/notarize.cjs
@@ -18,10 +21,14 @@ afterSign: build/notarize.cjs
 files:
   - main.js
   - preload.js
+  - island/**/*
   - renderer/**/*
   - node_modules/**/*
   - "!node_modules/electron/**"
   - "!node_modules/electron-builder/**"
+  # Windows uses WinKeyServer.exe; macOS/X11 helpers are not loadable here.
+  - "!node_modules/node-global-key-listener/bin/MacKeyServer"
+  - "!node_modules/node-global-key-listener/bin/X11KeyServer"
 
 extraResources:
   - from: backend
@@ -31,6 +38,7 @@ extraResources:
       - "!__pycache__/**"
       - "!*.pyc"
       - "!.env"
+      - "!providers/codex_schemas/**"
   - from: setup.sh
     to: setup.sh
   - from: scripts/win-alt-ptt.ps1

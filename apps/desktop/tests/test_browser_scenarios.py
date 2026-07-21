@@ -17,7 +17,7 @@ import websockets
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO_ROOT, "backend"))
 
-os.environ.setdefault("ADELE_BROWSER_BRIDGE_TOKEN", "dev-bridge-token")
+os.environ.setdefault("ADELE_BROWSER_BRIDGE_TOKEN", "test-browser-bridge-token")
 
 from browser.bridge import browser_bridge
 from browser.store import browser_store
@@ -29,6 +29,7 @@ from tools.browser_tools import (
     browser_click_ref,
     browser_describe_ref,
     browser_find,
+    browser_list_tabs,
     browser_refresh_refs,
     browser_snapshot,
     browser_wait_for,
@@ -75,6 +76,50 @@ async def test_invalid_token_handshake():
     await _with_server(scenario)
 
 
+async def test_tab_inventory_reports_live_count_without_tab_metadata():
+    _reset_state()
+
+    async def scenario(port):
+        async with websockets.connect(f"ws://127.0.0.1:{port}") as websocket:
+            await websocket.send(json.dumps({
+                "type": "browser_bridge_hello",
+                "token": browser_bridge.session_token,
+                "session_id": "tab-session",
+                "extension_name": "scenario-test",
+            }))
+            hello = json.loads(await websocket.recv())
+            assert hello["ok"] is True
+
+            inventory = {
+                "type": "browser_tab_inventory",
+                "tabs": [
+                    {"tab_id": "tab-1", "url": "https://one.example", "title": "One"},
+                    {"tab_id": "tab-2", "url": "https://two.example", "title": "Two"},
+                ],
+            }
+            await websocket.send(json.dumps(inventory))
+            acknowledged = json.loads(await websocket.recv())
+            assert acknowledged["type"] == "browser_tab_inventory_ack"
+            assert acknowledged["count"] == 2
+
+            count_task = asyncio.create_task(browser_list_tabs(summary_only=True))
+            refresh_request = json.loads(await websocket.recv())
+            assert refresh_request["type"] == "browser_tab_inventory_request"
+            await websocket.send(json.dumps(inventory))
+            await websocket.recv()
+            payload = json.loads(await count_task)
+            assert payload == {"status": "ok", "count": 2, "total_tabs": 2}
+
+    await _with_server(scenario)
+
+
+async def test_tab_query_without_bridge_never_attempts_to_launch_chrome():
+    _reset_state()
+    payload = json.loads(await browser_list_tabs(summary_only=True))
+    assert payload["status"] == "browser_bridge_unavailable"
+    assert "did not open Chrome" in payload["message"]
+
+
 async def test_snapshot_and_tool_flow():
     _reset_state()
 
@@ -83,7 +128,7 @@ async def test_snapshot_and_tool_flow():
         async with websockets.connect(uri) as websocket:
             await websocket.send(json.dumps({
                 "type": "browser_bridge_hello",
-                "token": "dev-bridge-token",
+                "token": browser_bridge.session_token,
                 "session_id": "session-1",
                 "extension_name": "scenario-test",
             }))
@@ -285,7 +330,7 @@ async def test_unknown_ref_errors():
         async with websockets.connect(f"ws://127.0.0.1:{port}") as websocket:
             await websocket.send(json.dumps({
                 "type": "browser_bridge_hello",
-                "token": "dev-bridge-token",
+                "token": browser_bridge.session_token,
                 "session_id": "session-2",
                 "extension_name": "scenario-test",
             }))
@@ -320,7 +365,7 @@ async def test_browser_snapshot_waits_for_late_connection():
             async with websockets.connect(uri) as websocket:
                 await websocket.send(json.dumps({
                     "type": "browser_bridge_hello",
-                    "token": "dev-bridge-token",
+                    "token": browser_bridge.session_token,
                     "session_id": "late-session",
                     "extension_name": "scenario-test",
                 }))
@@ -378,7 +423,7 @@ async def test_browser_click_match_prefers_youtube_video_links_for_generic_video
             async with websockets.connect(uri) as websocket:
                 await websocket.send(json.dumps({
                     "type": "browser_bridge_hello",
-                    "token": "dev-bridge-token",
+                    "token": browser_bridge.session_token,
                     "session_id": "yt-session",
                     "extension_name": "scenario-test",
                 }))

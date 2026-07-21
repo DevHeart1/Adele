@@ -11,7 +11,8 @@ const State = Object.freeze({
   RESPONDING: "RESPONDING"
 });
 
-const WS_URL = "ws://127.0.0.1:8000/ws";
+let WS_URL = "ws://127.0.0.1:8000/ws";
+let websocketUrlReady = false;
 
 /* ── IPC Bridge ── */
 const bridge = window.overlayAPI || {
@@ -46,9 +47,28 @@ const bridge = window.overlayAPI || {
   revealExtension: async () => false,
   onSetupProgress: () => () => { },
   onSettingsOpen: () => () => { },
+  getBackendWsUrl: async () => "",
   isFirstLaunch: async () => false,
   generateUserId: async () => ({}),
 };
+
+function applyBackendWsUrl(candidate) {
+  try {
+    const url = new URL(String(candidate || ""));
+    const localHost = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1";
+    if (url.protocol === "ws:" && localHost && url.pathname === "/ws") WS_URL = url.toString();
+  } catch {
+    // Keep the safe local default when configuration is unavailable or invalid.
+  }
+}
+
+Promise.resolve(bridge.getBackendWsUrl?.())
+  .then(applyBackendWsUrl)
+  .catch(() => {})
+  .finally(() => {
+    websocketUrlReady = true;
+    connectWebSocket();
+  });
 
 function openExternalUrl(url) {
   return bridge.openExternal?.(url) ?? Promise.resolve(false);
@@ -145,6 +165,17 @@ const settingsGeminiModel = document.getElementById("settings-gemini-model");
 const settingsStatus = document.getElementById("settings-status");
 const settingsSave = document.getElementById("settings-save");
 const settingsCancel = document.getElementById("settings-cancel");
+const settingsIslandSection = document.getElementById("settings-island-section");
+const settingsIslandEnabled = document.getElementById("settings-island-enabled");
+const settingsIslandOptions = document.getElementById("settings-island-options");
+const settingsIslandMedia = document.getElementById("settings-island-media");
+const settingsIslandNotifications = document.getElementById("settings-island-notifications");
+const settingsIslandHideBody = document.getElementById("settings-island-hide-body");
+const settingsIslandMicrophone = document.getElementById("settings-island-microphone");
+const settingsIslandCamera = document.getElementById("settings-island-camera");
+const settingsIslandFullscreen = document.getElementById("settings-island-fullscreen");
+const settingsIslandMonitor = document.getElementById("settings-island-monitor");
+const settingsIslandPreview = document.getElementById("settings-island-preview");
 let settingsSelectedVoiceId = "";
 let settingsDefaultMode = "guide";
 
@@ -217,6 +248,7 @@ const app = {
   actionMessage: "Processing...",
   autoResetTimer: null,
   workWatchdogTimer: null,
+  taskCompletionTimer: null,
   streamTimer: null,       // Character-by-character typing interval
   streamQueue: "",         // Text waiting to be streamed
   streamIndex: 0,          // Current position in stream
@@ -291,6 +323,22 @@ function reportPresence(state = app.current, detail = "") {
   if (!bridge.setPresenceStatus) return;
   const label = PRESENCE_LABELS[state] || "ADELE";
   bridge.setPresenceStatus(state, detail || label);
+}
+
+function mirrorIslandState(next, { text = "", appName = "" } = {}) {
+  if (!bridge.publishIslandEvent) return;
+  const payload = {
+    title: String(text || "ADELE").slice(0, 120),
+    detail: String(text || "").slice(0, 180),
+    appName: String(appName || "").slice(0, 80),
+  };
+  let type = "";
+  if (next === State.LISTENING) type = "adele.listening.started";
+  else if (next === State.LOADING) type = "adele.thinking.started";
+  else if (next === State.DOING) type = "adele.action.updated";
+  else if (next === State.RESPONDING) type = "adele.speaking.started";
+  else if (next === State.IDLE) type = "adele.activity.idle";
+  if (type) bridge.publishIslandEvent({ type, payload, timestamp: Date.now() });
 }
 
 function currentCursorAnchor() {
@@ -582,6 +630,12 @@ function syncCompanionCursor(next = app.current, { text = "", variant = "", forc
     hideAdeleCursor();
     return;
   }
+  // An idle, transparent overlay should not leave an animated cursor on top
+  // of the user's other applications.
+  if (next === State.IDLE) {
+    hideAdeleCursor();
+    return;
+  }
   if (!force && Date.now() < app.cursorAutomationUntil) return;
   const point = currentCursorAnchor();
   const copy = cursorCopyForState(next, text, variant);
@@ -858,6 +912,28 @@ function setState(next, { tier = "", text = null, appName = "", iconUrl = "", fo
 
   syncCompanionCursor(next, { text: text || "", variant, force: true });
   reportPresence(next, text || PRESENCE_LABELS[next] || "ADELE");
+  mirrorIslandState(next, { text: text || "", appName });
+}
+
+function clearTaskCompletionTimer() {
+  if (!app.taskCompletionTimer) return;
+  clearTimeout(app.taskCompletionTimer);
+  app.taskCompletionTimer = null;
+}
+
+function scheduleTaskUiRecovery(taskId) {
+  clearTaskCompletionTimer();
+  app.taskCompletionTimer = window.setTimeout(() => {
+    app.taskCompletionTimer = null;
+    // A normal response changes state to RESPONDING before this runs. This is
+    // only a recovery path for a completed/interrupted request that produced
+    // no renderer terminal message, which previously left the model pill on
+    // screen indefinitely.
+    if (app.currentTaskId || ![State.LOADING, State.DOING, State.PAUSED].includes(app.current)) return;
+    clearWorkWatchdog();
+    clearCommandContext();
+    setState(State.IDLE, { force: true });
+  }, 1000);
 }
 
 function clearCommandContext() {
@@ -1569,6 +1645,12 @@ function showListModal(data, awaitInput) {
 /* ── Confirm Modal ── */
 function showConfirmModal(data, awaitInput) {
   confirmBody.innerHTML = renderMarkdown(data.message || '');
+  const approvalId = String(data.approval_id || data.approvalId || app.currentTaskId || "").slice(0, 120);
+  bridge.publishIslandEvent?.({
+    type: "adele.approval.required",
+    payload: { title: data.title || "Approval required", detail: String(data.message || "Review this action in ADELE.").slice(0, 180), approvalId },
+    timestamp: Date.now(),
+  });
 
   confirmActions.innerHTML = '';
   (data.actions || []).forEach((action, i) => {
@@ -1583,6 +1665,7 @@ function showConfirmModal(data, awaitInput) {
           action: action.value
         }));
       }
+      bridge.publishIslandEvent?.({ type: "adele.approval.resolved", payload: { approvalId }, timestamp: Date.now() });
       dismissAllModals();
       setState(State.LOADING, { force: true });
     });
@@ -2130,6 +2213,7 @@ function scheduleReconnect() {
 
 function connectWebSocket() {
   if (app.isDisposed) return;
+  if (!websocketUrlReady) return;
   if (app.ws && (app.ws.readyState === WebSocket.OPEN || app.ws.readyState === WebSocket.CONNECTING)) return;
 
   try {
@@ -2149,6 +2233,7 @@ function connectWebSocket() {
       // mic permission was granted during onboarding) or where the WS
       // reconnected after a disconnect.
       startAudioStreaming();
+      flushPendingCodexAuthRequest();
     });
 
     app.ws.addEventListener("message", (event) => {
@@ -2157,6 +2242,24 @@ function connectWebSocket() {
       try { msg = JSON.parse(event.data); } catch { return; }
 
       console.log("[WS] Received:", msg);
+
+      if (msg.type === "codex_auth_state") {
+        renderCodexAuthState(msg.state);
+        return;
+      }
+      if (msg.type === "codex_auth_login_result") {
+        const result = msg.result || {};
+        if (result.authUrl) {
+          bridge.openCodexAuthUrl?.(result.authUrl).then((opened) => {
+            if (!opened && chatgptStatus) chatgptStatus.textContent = "Could not open the ChatGPT sign-in page. Try again or use device code.";
+          });
+        }
+        if (result.userCode && chatgptDeviceCode) {
+          chatgptDeviceCode.textContent = `Enter code ${result.userCode} in the browser window.`;
+          chatgptDeviceCode.classList.remove("hidden");
+        }
+        return;
+      }
 
       if (msg.type === "test_gemini_result") {
         if (pendingGeminiTest) {
@@ -2194,15 +2297,41 @@ function connectWebSocket() {
 
       if (msg.type === "task_event") {
         if (msg.phase === "start") {
+          clearTaskCompletionTimer();
           app.currentTaskId = msg.taskId || null;
         } else if (msg.phase === "cancelled") {
-          app.automationLockToolCount = 0;
-          void setAutomationLock(false);
+          // A delayed cancellation from an older turn must not clear the UI
+          // for a newer task already in progress.
+          if (!msg.taskId || msg.taskId === app.currentTaskId) {
+            app.currentTaskId = null;
+            app.automationLockToolCount = 0;
+            void setAutomationLock(false);
+            scheduleTaskUiRecovery(msg.taskId || "");
+          }
         } else if (msg.taskId && msg.taskId === app.currentTaskId) {
           app.currentTaskId = null;
           app.automationLockToolCount = 0;
           void setAutomationLock(false);
+          scheduleTaskUiRecovery(msg.taskId);
         }
+        return;
+      }
+
+      if (msg.type === "model_trace") {
+        // Model metadata is diagnostic information, not an action. Showing
+        // it as a DOING pill made a completed turn look permanently stuck
+        // (for example: "gpt-5.6-sol · …"). Keep the visible UI neutral and
+        // let the task/response events describe actual work instead.
+        bridge.publishIslandEvent?.({
+          type: "adele.thinking.started",
+          payload: {
+            title: "Thinking",
+            detail: String(msg.model || "GPT-5.6").slice(0, 80),
+            taskId: msg.taskId || "",
+          },
+          timestamp: Date.now(),
+        });
+        setState(State.LOADING, { force: true });
         return;
       }
 
@@ -2223,6 +2352,11 @@ function connectWebSocket() {
             force: true
           });
         } else if (msg.phase === "paused") {
+          bridge.publishIslandEvent?.({
+            type: "adele.action.failed",
+            payload: { title: "Paused", detail: String(msg.message || "Action paused").slice(0, 180), taskId: msg.taskId || "" },
+            timestamp: Date.now(),
+          });
           clearWorkWatchdog();
           setState(State.PAUSED, {
             text: msg.message || "Paused: the screen did not visibly change",
@@ -2296,6 +2430,11 @@ function connectWebSocket() {
         const text = payload.text || payload.message || "Done!";
         const awaitInput = payload.await_input || false;
         app.detectedApp = payload.app || "";
+        bridge.publishIslandEvent?.({
+          type: "adele.action.completed",
+          payload: { title: "Completed", detail: String(text).slice(0, 180), taskId: msg.taskId || "" },
+          timestamp: Date.now(),
+        });
 
         if (app.onboardingTesting) {
           app.onboardingTesting = false;
@@ -2392,7 +2531,7 @@ function connectWebSocket() {
     app.ws.addEventListener("error", (err) => {
       console.error("[WS] Connection Error:", err);
       if (bridge.logError) {
-        bridge.logError("WebSocket connection failed to ws://127.0.0.1:8000/ws");
+        bridge.logError(`WebSocket connection failed to ${WS_URL}`);
       }
     });
 
@@ -2515,6 +2654,7 @@ bridge.onOverlayHidden(async () => {
   closeCommandPanel({ clear: true });
   app.visible = true;
   wrapper.classList.remove("hidden");
+  hideAdeleCursor();
   setMouseEnabled(false);
   setState(State.IDLE, { force: true });
 });
@@ -2524,6 +2664,7 @@ window.addEventListener("beforeunload", async () => {
   await stopAudioStreaming();
   if (app.reconnectTimer) clearTimeout(app.reconnectTimer);
   clearConnectionLostTimer();
+  clearTaskCompletionTimer();
   closeWebSocketQuietly();
 });
 
@@ -2544,7 +2685,10 @@ const onboardingBootVersion = document.getElementById("onboarding-boot-version")
 const onboardingCard = document.getElementById("onboarding-card");
 const onboardingBack = document.getElementById("onboarding-back");
 const onboardingStart = document.getElementById("onboarding-start");
-const onboardingSteps = [onboardingStep0, onboardingStep1, onboardingStep2, onboardingStep3, onboardingStepVoiceSelect, onboardingStep4, onboardingStep5];
+// The welcome screen is the ChatGPT entry point; the intermediate screen is removed.
+onboardingStep1?.remove();
+// Local memory is automatic; it is not an onboarding decision or screen.
+const onboardingSteps = [onboardingStep0, onboardingStep1, onboardingStep3, onboardingStepVoiceSelect, onboardingStep4, onboardingStep5];
 const onboardingProgressDots = Array.from(document.querySelectorAll("[data-onboarding-progress]"));
 let onboardingStepIndex = 0;
 let pendingMongoTest = null;
@@ -2588,12 +2732,13 @@ async function hydrateWindowsOnboardingHints() {
 }
 
 function showOnboardingStep(index) {
+  if (index === 1) index = 0;
   onboardingStepIndex = Math.max(0, Math.min(index, onboardingSteps.length - 1));
   onboardingSteps.forEach((step, stepIndex) => {
     step?.classList.toggle("active", stepIndex === onboardingStepIndex);
   });
   const progressIndex = onboardingStepIndex - 1;
-  document.getElementById("onboarding-progress-pill")?.classList.toggle("hidden", onboardingStepIndex === 0 || onboardingStepIndex === 6);
+  document.getElementById("onboarding-progress-pill")?.classList.toggle("hidden", onboardingStepIndex === 0 || onboardingStepIndex === onboardingSteps.length - 1);
   onboardingProgressDots.forEach((dot, dotIndex) => {
     dot.classList.toggle("active", dotIndex === progressIndex);
     dot.classList.toggle("complete", dotIndex < progressIndex);
@@ -2636,7 +2781,7 @@ const elevenlabsKeyInput = document.getElementById("onboarding-elevenlabs-key");
 const elevenlabsStatus = document.getElementById("onboarding-elevenlabs-status");
 const elevenlabsVoiceList = document.getElementById("onboarding-voice-list");
 const elevenlabsVoiceStatus = document.getElementById("onboarding-voice-status");
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
+const DEFAULT_GEMINI_MODEL = "gpt-5.6"; // Legacy identifier retained for settings DOM compatibility.
 const next0Btn = document.getElementById("onboarding-next-0");
 const next0BtnLabel = next0Btn?.querySelector(".onboarding-btn-label");
 const nextWakeBtn = document.getElementById("onboarding-next-wake");
@@ -2665,13 +2810,122 @@ const ollamaStatusText = document.getElementById("ollama-status-text");
 const ollamaRefresh = document.getElementById("ollama-refresh");
 const nextLocalBtn = document.getElementById("onboarding-next-local");
 const nextLocalBtnLabel = nextLocalBtn?.querySelector(".onboarding-btn-label");
+const chatgptConnectBtn = document.getElementById("onboarding-chatgpt-connect");
+const chatgptDeviceBtn = document.getElementById("onboarding-chatgpt-device");
+const chatgptCancelBtn = document.getElementById("onboarding-chatgpt-cancel");
+const chatgptStatus = document.getElementById("onboarding-chatgpt-status");
+const chatgptAccount = document.getElementById("onboarding-chatgpt-account");
+const chatgptDeviceCode = document.getElementById("onboarding-device-code");
+const settingsCodexCheck = document.getElementById("settings-codex-check");
+const settingsCodexLogout = document.getElementById("settings-codex-logout");
+let codexAuthState = null;
+let pendingCodexAuthRequest = null;
+let onboardingSignInRequested = false;
+
+function flushPendingCodexAuthRequest() {
+  if (!pendingCodexAuthRequest || !app.ws || app.ws.readyState !== WebSocket.OPEN) return;
+  const request = pendingCodexAuthRequest;
+  pendingCodexAuthRequest = null;
+  app.ws.send(JSON.stringify(request));
+}
+
+function sendCodexAuth(type, extra = {}) {
+  const request = { type, ...extra };
+  if (app.ws && app.ws.readyState === WebSocket.OPEN) {
+    app.ws.send(JSON.stringify(request));
+    return;
+  }
+  pendingCodexAuthRequest = request;
+  if (chatgptStatus) chatgptStatus.textContent = "Starting Adele's local connection…";
+  bridge.startBackend?.().then((result) => {
+    if (!result?.ok && chatgptStatus) {
+      chatgptStatus.textContent = result?.detail || "Adele could not start its local connection.";
+    }
+  }).catch(() => {
+    if (chatgptStatus) chatgptStatus.textContent = "Adele could not start its local connection.";
+  });
+}
+
+bridge.onIslandReviewApproval?.(() => {
+  // The confirmation modal remains owned by the existing renderer. The island
+  // simply makes it visible again; it has no approval capability of its own.
+  setMouseEnabled(true);
+  modalConfirm?.classList.remove("hidden", "dismissing");
+});
+
+bridge.onIslandSubmitCommand?.((command) => {
+  const text = String(command || "").trim();
+  if (!text) return;
+  // Island Home is only another entry point to the existing quick-command
+  // flow. The same WebSocket, planning, approval, and verification paths run.
+  dismissAllModals(true);
+  openCommandPanel(text);
+  void submitCommandPanel();
+});
+
+bridge.onIslandOpenSettings?.(() => {
+  void openSettings().then(() => {
+    settingsIslandSection?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  });
+});
+
+function renderCodexAuthState(state) {
+  codexAuthState = state || {};
+  const status = String(codexAuthState.state || "STARTING_RUNTIME");
+  const message = codexAuthState.message || "";
+  if (chatgptStatus) chatgptStatus.textContent = message || ({ READY: "Connected with ChatGPT", SIGNED_OUT: "Start with ChatGPT", LOGIN_PENDING: "Complete sign-in in your browser" }[status] || "Checking Codex connection...");
+  if (chatgptAccount) {
+    chatgptAccount.textContent = status === "READY"
+      ? `Model: ${codexAuthState.displayModel || "GPT-5.6"} · Reasoning: ${codexAuthState.reasoningEffort || "Medium"} · Status: Ready${codexAuthState.email ? ` · ${codexAuthState.email}` : ""}`
+      : "";
+  }
+  if (chatgptConnectBtn) {
+    chatgptConnectBtn.disabled = status === "STARTING_RUNTIME" || status === "LOGIN_STARTING";
+    const label = chatgptConnectBtn.querySelector("span");
+    if (label) label.textContent = status === "READY" ? "Start using Adele" : "Start with ChatGPT";
+  }
+  if (onboardingStart) {
+    const isSigningIn = status === "LOGIN_STARTING" || status === "LOGIN_PENDING";
+    onboardingStart.disabled = isSigningIn || status === "STARTING_RUNTIME";
+    onboardingStart.textContent = status === "READY"
+      ? "Continue"
+      : isSigningIn
+        ? "Complete sign-in in browser"
+        : "Start with ChatGPT";
+  }
+  chatgptDeviceBtn?.classList.toggle("hidden", status !== "LOGIN_PENDING");
+  chatgptCancelBtn?.classList.toggle("hidden", status !== "LOGIN_PENDING");
+  if (settingsGeminiStatus) settingsGeminiStatus.textContent = message;
+  setGeminiStatusPill(status === "READY" ? "connected" : status === "ERROR" ? "error" : "idle", status === "READY" ? "Connected with ChatGPT" : undefined);
+  if (settingsGeminiModel) settingsGeminiModel.textContent = codexAuthState.displayModel || "GPT-5.6";
+  if (status === "READY" && onboardingSignInRequested && onboardingStepIndex === 0) {
+    onboardingSignInRequested = false;
+    showOnboardingStep(2);
+  }
+}
 
 if (onboardingStart) {
   onboardingStart.addEventListener("click", () => {
-    showOnboardingStep(1);
-    geminiKeyInput?.focus();
+    if (codexAuthState?.state === "READY") {
+      showOnboardingStep(2);
+      return;
+    }
+    onboardingSignInRequested = true;
+    sendCodexAuth("codex_auth_login");
   });
 }
+
+chatgptConnectBtn?.addEventListener("click", () => {
+  if (codexAuthState?.state === "READY") {
+    showOnboardingStep(2);
+    return;
+  }
+  sendCodexAuth("codex_auth_login");
+});
+chatgptDeviceBtn?.addEventListener("click", () => sendCodexAuth("codex_auth_login", { device_code: true }));
+chatgptCancelBtn?.addEventListener("click", () => sendCodexAuth("codex_auth_cancel"));
+settingsCodexCheck?.addEventListener("click", () => sendCodexAuth("codex_auth_status"));
+settingsCodexLogout?.addEventListener("click", () => sendCodexAuth("codex_auth_logout"));
 
 function setLocalRuntime(runtime) {
   selectedLocalRuntime = runtime === "custom" ? "custom" : "ollama";
@@ -2883,7 +3137,7 @@ if (elevenlabsKeyInput) {
 }
 
 // Pre-fill the bundled Picovoice key so wake word works out of the box
-const BUNDLED_PICOVOICE_KEY = "lDvqq7J641WbqdzMsPCdLlawELhfGZOGhaceFzl3ZYYYzeeuXq55YA==";
+const BUNDLED_PICOVOICE_KEY = "";
 if (picovoiceKeyInput) picovoiceKeyInput.value = BUNDLED_PICOVOICE_KEY;
 
 // ── Settings (hotkey / overlay) ──
@@ -2899,6 +3153,32 @@ function setGeminiStatusPill(state, label) {
     error: "Error",
   };
   settingsGeminiStatusPill.textContent = label || labels[normalized] || labels.idle;
+}
+
+function readIslandSettings() {
+  return {
+    enabled: settingsIslandEnabled?.checked === true,
+    show_media: settingsIslandMedia?.checked !== false,
+    show_notifications: settingsIslandNotifications?.checked === true,
+    hide_notification_body: settingsIslandHideBody?.checked === true,
+    show_microphone: settingsIslandMicrophone?.checked !== false,
+    show_camera: settingsIslandCamera?.checked !== false,
+    hide_in_fullscreen: settingsIslandFullscreen?.checked !== false,
+    monitor_mode: settingsIslandMonitor?.value || "primary",
+  };
+}
+
+function renderIslandSettings(preferences = {}) {
+  const island = preferences && typeof preferences === "object" ? preferences : {};
+  if (settingsIslandEnabled) settingsIslandEnabled.checked = island.enabled === true;
+  if (settingsIslandMedia) settingsIslandMedia.checked = island.show_media !== false;
+  if (settingsIslandNotifications) settingsIslandNotifications.checked = island.show_notifications === true;
+  if (settingsIslandHideBody) settingsIslandHideBody.checked = island.hide_notification_body !== false;
+  if (settingsIslandMicrophone) settingsIslandMicrophone.checked = island.show_microphone !== false;
+  if (settingsIslandCamera) settingsIslandCamera.checked = island.show_camera !== false;
+  if (settingsIslandFullscreen) settingsIslandFullscreen.checked = island.hide_in_fullscreen !== false;
+  if (settingsIslandMonitor) settingsIslandMonitor.value = island.monitor_mode === "cursor" ? "cursor" : "primary";
+  settingsIslandOptions?.classList.toggle("hidden", island.enabled !== true);
 }
 
 async function populateSettingsForm() {
@@ -2927,6 +3207,7 @@ async function populateSettingsForm() {
   if (settingsRuleNoScreenshot) settingsRuleNoScreenshot.checked = creds.memory_no_screenshots !== false;
   if (settingsRuleSummaries) settingsRuleSummaries.checked = creds.memory_summaries_only !== false;
   if (settingsRuleSensitive) settingsRuleSensitive.checked = creds.memory_disable_sensitive_apps !== false;
+  renderIslandSettings(creds.adele_island || {});
   const perms = creds.permissions || {};
   if (settingsPermMic) settingsPermMic.checked = perms.microphone !== false;
   if (settingsPermScreen) settingsPermScreen.checked = perms.screenCapture !== false;
@@ -2993,6 +3274,7 @@ async function populateSettingsForm() {
       plat = "";
     }
     settingsWinNote.classList.toggle("hidden", plat !== "win32");
+    settingsIslandSection?.classList.toggle("hidden", plat !== "win32");
   }
 }
 
@@ -3066,6 +3348,28 @@ if (settingsModeGuide) {
 }
 if (settingsModeAssist) {
   settingsModeAssist.addEventListener("click", () => setSettingsMode("assist"));
+}
+
+if (settingsIslandEnabled) {
+  settingsIslandEnabled.addEventListener("change", () => {
+    settingsIslandOptions?.classList.toggle("hidden", !settingsIslandEnabled.checked);
+  });
+}
+
+if (settingsIslandPreview) {
+  settingsIslandPreview.addEventListener("click", async () => {
+    const previous = settingsIslandPreview.textContent;
+    settingsIslandPreview.disabled = true;
+    settingsIslandPreview.textContent = "Previewing…";
+    try {
+      // Preview is deliberately local and does not ask Windows for media or
+      // notification permissions.
+      await bridge.previewIsland?.();
+    } finally {
+      settingsIslandPreview.disabled = false;
+      settingsIslandPreview.textContent = previous;
+    }
+  });
 }
 
 if (settingsReopenWizard) {
@@ -3201,15 +3505,6 @@ if (settingsCancel) settingsCancel.addEventListener("click", () => closeSettings
 
 if (settingsSave) {
   settingsSave.addEventListener("click", async () => {
-    const geminiKey = settingsGeminiKey?.value.trim() ?? "";
-    if (!geminiKey) {
-      if (settingsStatus) {
-        settingsStatus.textContent = "Gemini API key is required.";
-        settingsStatus.classList.add("error");
-      }
-      settingsGeminiKey?.focus();
-      return;
-    }
     if (settingsStatus) settingsStatus.classList.remove("error");
     const prevDisabled = settingsSave.disabled;
     const prevLabel = settingsSave.textContent;
@@ -3223,9 +3518,6 @@ if (settingsSave) {
       const mongoDb = settingsMongodbDb?.value.trim() || "adele";
       const newCreds = {
         ...existing,
-        llm_provider: "gemini",
-        gemini_api_key: geminiKey,
-        gemini_model: DEFAULT_GEMINI_MODEL,
         mongodb_uri: mongoUri,
         mongodb_db: mongoDb,
         default_mode: settingsDefaultMode,
@@ -3233,6 +3525,7 @@ if (settingsSave) {
         memory_no_screenshots: settingsRuleNoScreenshot ? settingsRuleNoScreenshot.checked : true,
         memory_summaries_only: settingsRuleSummaries ? settingsRuleSummaries.checked : true,
         memory_disable_sensitive_apps: settingsRuleSensitive ? settingsRuleSensitive.checked : true,
+        adele_island: readIslandSettings(),
         custom_shortcut: settingsShortcutSelect?.value || "CommandOrControl+Shift+Space",
         permissions: {
           microphone: settingsPermMic ? settingsPermMic.checked : true,
@@ -3253,6 +3546,7 @@ if (settingsSave) {
         newCreds.picovoice_key = existing.picovoice_key || BUNDLED_PICOVOICE_KEY;
       }
       await bridge.saveCredentials?.(newCreds);
+      await bridge.applyIslandPreferences?.(newCreds.adele_island);
       if (settingsStatus) settingsStatus.textContent = "Restarting backend…";
       const restart = await bridge.restartBackend?.() ?? { ok: false };
       if (settingsStatus) {
@@ -3480,13 +3774,26 @@ async function previewElevenlabsVoice(voice, button) {
 }
 
 async function fetchElevenlabsVoices(apiKey) {
-  const response = await fetch("https://api.elevenlabs.io/v1/voices", {
-    method: "GET",
-    headers: {
-      "Accept": "application/json",
-      "xi-api-key": apiKey,
-    },
-  });
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+  let response;
+  try {
+    response = await fetch("https://api.elevenlabs.io/v1/voices", {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "xi-api-key": apiKey,
+      },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error("ElevenLabs did not respond. Check your connection and try again.");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     let detail = "";
@@ -3595,7 +3902,7 @@ function renderElevenlabsVoices(voices, options = {}) {
   if (!useSettings && nextVoiceSelectBtn) nextVoiceSelectBtn.disabled = !selectedElevenlabsVoiceId;
 }
 
-// ── API key continue → MongoDB ──
+// ── Legacy provider settings continue ──
 if (next0Btn) {
   next0Btn.addEventListener("click", async (event) => {
     event.stopImmediatePropagation();
@@ -3619,39 +3926,20 @@ if (next0Btn) {
     if (next0BtnLabel) next0BtnLabel.textContent = "Continue";
     next0Btn.disabled = false;
 
-    showOnboardingStep(4);
-    document.getElementById("onboarding-mongodb-uri")?.focus();
+    showOnboardingStep(2);
+    elevenlabsKeyInput?.focus();
   }, true);
 }
 
 if (nextWakeBtn) {
   nextWakeBtn.addEventListener("click", async () => {
-    const mongoUriInput = document.getElementById("onboarding-mongodb-uri");
-    const mongoDbInput = document.getElementById("onboarding-mongodb-db");
-    const uri = (mongoUriInput?.value || "").trim();
-    const db = (mongoDbInput?.value || "adele").trim();
-    const existing = await bridge.loadCredentials?.() ?? {};
-    await bridge.saveCredentials?.({
-      ...existing,
-      mongodb_uri: uri,
-      mongodb_db: db
-    });
-    showOnboardingStep(5);
+    showOnboardingStep(4);
     elevenlabsKeyInput?.focus();
   });
 }
 
 if (nextVoiceBtn) {
   nextVoiceBtn.addEventListener("click", async () => {
-    const geminiKey = geminiKeyInput?.value.trim() ?? "";
-    const savedCreds = await bridge.loadCredentials?.() ?? {};
-    const provider = savedCreds.llm_provider || "gemini";
-    if (provider === "gemini" && !geminiKey && !savedCreds.gemini_api_key) {
-      showOnboardingStep(3);
-      geminiKeyInput?.focus();
-      return;
-    }
-
     const elKey = elevenlabsKeyInput?.value.trim() ?? "";
     if (!elKey) {
       setOnboardingStatus(elevenlabsStatus, "Enter your ElevenLabs API key to continue.", true);
@@ -3670,7 +3958,7 @@ if (nextVoiceBtn) {
       }
       renderElevenlabsVoices(onboardingElevenlabsVoices);
       setOnboardingStatus(elevenlabsVoiceStatus, `${onboardingElevenlabsVoices.length} voices loaded. Choose one to continue.`);
-      showOnboardingStep(6);
+      showOnboardingStep(3);
     } catch (error) {
       setOnboardingStatus(elevenlabsStatus, error?.message || "Could not load ElevenLabs voices. Check your API key.", true);
       elevenlabsKeyInput?.focus();
@@ -3705,7 +3993,7 @@ if (nextVoiceSelectBtn) {
     if (picoKey) newCreds.picovoice_key = picoKey;
     await bridge.saveCredentials?.(newCreds);
 
-    showOnboardingStep(7);
+    showOnboardingStep(4);
     runSetupChecklist();
     if (nextVoiceSelectBtnLabel) nextVoiceSelectBtnLabel.textContent = "Save & Continue";
   });
@@ -3799,7 +4087,7 @@ async function runSetupChecklist() {
     wsDetail = "Backend is unavailable, so the websocket could not be opened.";
   }
   if (!wsOk && !wsDetail) {
-    wsDetail = "ADELE could not connect to ws://127.0.0.1:8000/ws yet. Open 'more' for startup details.";
+    wsDetail = `ADELE could not connect to ${WS_URL} yet. Open 'more' for startup details.`;
   }
   setCheck(checkWsEl, wsOk ? "ok" : "fail", wsOk ? "Connected." : wsDetail);
 
@@ -3817,39 +4105,10 @@ async function runSetupChecklist() {
 
   
   
-  // MongoDB validation
-  const checkMongoEl = document.getElementById("check-mongodb");
-  setCheck(checkMongoEl, "spin", "Verifying memory...");
-  let mongoOk = true;
-  const savedCreds = await bridge.loadCredentials?.() ?? {};
-  const mongoUri = (savedCreds.mongodb_uri || "").trim();
-  const mongoDb = (savedCreds.mongodb_db || "adele").trim();
-  
-  if (mongoUri) {
-    if (wsOk) {
-      try {
-        const testRes = await testMongodb(mongoUri, mongoDb);
-        if (testRes.success) {
-          setCheck(checkMongoEl, "ok", "Connected.");
-          // Try to automatically create collections/indices
-          await createMongodbCollections(mongoUri, mongoDb);
-        } else {
-          mongoOk = false;
-          setCheck(checkMongoEl, "fail", testRes.error || "Could not connect to MongoDB.");
-        }
-      } catch (err) {
-        mongoOk = false;
-        setCheck(checkMongoEl, "fail", err.message || "Connection test failed.");
-      }
-    } else {
-      mongoOk = false;
-      setCheck(checkMongoEl, "fail", "Backend connection unavailable.");
-    }
-  } else {
-    setCheck(checkMongoEl, "ok", "Skipped (local memory).");
-  }
+  const checkLocalMemoryEl = document.getElementById("check-local-memory");
+  setCheck(checkLocalMemoryEl, "ok", "Ready on this device.");
 
-  if (next2Btn) next2Btn.disabled = !(startResult.ok && wsOk && mongoOk);
+  if (next2Btn) next2Btn.disabled = !(startResult.ok && wsOk);
 }
 
 if (next2Btn) {
@@ -4151,7 +4410,7 @@ if (onboardingDone) {
     const customShortcut = onboardingShortcutSelect ? onboardingShortcutSelect.value : "CommandOrControl+Shift+Space";
 
     const existing = await bridge.loadCredentials?.() ?? {};
-    await bridge.saveCredentials?.({
+    const saved = await bridge.saveCredentials?.({
       ...existing,
       default_mode: mode,
       memory_approval_required: reqApproval,
@@ -4160,6 +4419,11 @@ if (onboardingDone) {
       memory_disable_sensitive_apps: disableSensitive,
       custom_shortcut: customShortcut
     });
+
+    if (!saved) {
+      appendSetupLogLine("Could not save Adele's local setup. Please try again.");
+      return;
+    }
 
     onboardingOverlay.classList.add("hidden");
     setMouseEnabled(false);

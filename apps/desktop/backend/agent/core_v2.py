@@ -43,7 +43,11 @@ from tools.registry import set_automation_cursor_callback
 from providers.router import ModelRouter
 from providers import LLMProvider
 import agent.perception as perception
-from agent.plan_journal import journal_execution_snapshot, journal_pending_approval
+from agent.plan_journal import (
+    journal_execution_snapshot,
+    journal_pending_approval,
+    journal_request_trace,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -51,6 +55,24 @@ from agent.plan_journal import journal_execution_snapshot, journal_pending_appro
 # ═══════════════════════════════════════════════════════════════
 
 PENDING_PLAN_TTL_SECONDS = 600
+
+
+def _trace_error_code(value: object) -> str:
+    """Collapse failures into safe diagnostic categories without logging text."""
+    normalized = str(value or "").lower()
+    if "timeout" in normalized or "timed out" in normalized:
+        return "timeout"
+    if "approval" in normalized or "confirm" in normalized:
+        return "approval_required"
+    if "verify" in normalized or "still running" in normalized:
+        return "verification_failed"
+    if "unavailable" in normalized or "not connected" in normalized:
+        return "unavailable"
+    if "tool" in normalized or "execute" in normalized:
+        return "tool_execution_failed"
+    if normalized:
+        return "request_failed"
+    return "unknown"
 
 # Browser timing — seconds to wait after navigation actions so the page
 # has time to load and the snapshot can be refreshed.  Centralised here
@@ -115,16 +137,8 @@ SYSTEM_PROMPT_V2 = """You are ADELE, a cross-platform desktop assistant.
 Before EVERY tool call you MUST include a `reasoning` argument — one sentence
 explaining WHY you are calling that tool and what you expect the result to be.
 
-<thought>
-Before calling any tool, think step-by-step:
-1. What is my current goal?
-2. What do I know from previous tool results?
-3. What is the best next action and why?
-</thought>
-
-You MUST output a <thought> block before each tool call in your response.
-The reasoning argument is your external justification; the thought block is
-your internal chain-of-thought.
+Never request or reveal private chain-of-thought. The reasoning argument is a
+brief, user-safe justification for the requested action.
 
 Core behavior:
 - Requests are voice-transcribed; correct obvious transcription errors.
@@ -136,6 +150,9 @@ Tooling rules:
 - UI interaction: prefer `click_ui` and `type_in_field`.
 - Browser interaction: use extension tools (`browser_read_page`, `browser_click_match`, `browser_click_ref`, `browser_type_ref`, `browser_select_ref`).
 - Browser scrolling: use `browser_scroll`, not `press_key`.
+- For time-sensitive factual questions (for example current results, rosters,
+  prices, schedules, or news), call `get_web_information` before answering.
+  Do not rely on static model knowledge for a request that could have changed.
 - Use `run_shell` only for real shell/file/system tasks, never for browser/UI automation.
 - For file edits: read first (`read_file`), then mutate (`replace_in_file`/`write_file`).
 - For Google Docs/Sheets/Slides/Gmail/Calendar, prefer dedicated `g*` API tools.
@@ -223,7 +240,7 @@ class AdeleAgentV2:
         self.intent_parser = IntentParser()
         self.entity_extractor = EntityExtractor()
         self.tool_selector = get_tool_selector(tool_registry)
-        self.verifier = get_verifier()
+        self.verifier = get_verifier(router=self.router)
         self.planner: Optional[TaskPlanner] = None  # Lazy init with provider
         self._pending_plan: Optional[PendingPlanState] = None
         self._pending_execution: Optional[PendingExecutionState] = None
@@ -373,11 +390,136 @@ class AdeleAgentV2:
         _re.IGNORECASE,
     )
 
+    _VAULT_USER_SEPARATOR = "\n---\nUser:\n"
+    _DIRECT_SCREEN_QUESTION_MARKERS = (
+        "what can you see",
+        "what do you see",
+        "what is on my screen",
+        "what's on my screen",
+        "describe the screen",
+        "read the screen",
+        "look at my screen",
+        "what is visible",
+        "what's visible",
+    )
+    _ACTION_REQUEST_MARKERS = (
+        "open",
+        "launch",
+        "click",
+        "tap",
+        "type",
+        "send",
+        "delete",
+        "remove",
+        "close",
+        "create",
+        "write",
+        "download",
+        "install",
+        "search",
+        "find",
+        "play",
+        "start",
+        "stop",
+    )
+    _CONTENT_REQUEST_NOUNS = (
+        "story",
+        "poem",
+        "essay",
+        "script",
+        "outline",
+        "draft",
+        "bio",
+        "caption",
+        "post",
+        "message",
+        "email",
+        "letter",
+        "speech",
+        "proposal",
+        "summary",
+        "summary",
+    )
+    _DESKTOP_INSERTION_PATTERNS = (
+        r"\b(?:type|paste|insert|put|enter)\b",
+        r"\b(?:write|draft|create|generate)\b.*?\b(?:in|into|on)\s+"
+        r"(?:my|the|this)?\s*(?:google docs?|document|notepad|editor|text box|form)\b",
+    )
+
+    @classmethod
+    def _visible_user_request(cls, text: str) -> str:
+        """Remove the internal vault envelope before classifying speech."""
+        raw = str(text or "")
+        if cls._VAULT_USER_SEPARATOR in raw:
+            return raw.rsplit(cls._VAULT_USER_SEPARATOR, 1)[-1].strip()
+        return raw.strip()
+
+    @classmethod
+    def _vault_retrieval_context(cls, text: str) -> str:
+        """Extract local vault recall without mixing it into the user command."""
+        raw = str(text or "")
+        if cls._VAULT_USER_SEPARATOR not in raw:
+            return ""
+        return raw.rsplit(cls._VAULT_USER_SEPARATOR, 1)[0].strip()
+
+    @classmethod
+    def _is_contextual_guidance_question(cls, text: str) -> bool:
+        """Recognize advice requests that should answer, never plan or act."""
+        normalized = " ".join(cls._visible_user_request(text).lower().split())
+        if not normalized or any(marker in normalized for marker in cls._DIRECT_SCREEN_QUESTION_MARKERS):
+            return False
+
+        # Action requests remain on the existing approval and verification path.
+        if any(_re.search(rf"\b{_re.escape(marker)}\b", normalized) for marker in cls._ACTION_REQUEST_MARKERS):
+            return normalized.startswith(("how do i ", "how can i ", "what should i do"))
+
+        guidance_starts = (
+            "why ",
+            "what should i do",
+            "what do i do next",
+            "what next",
+            "how do i ",
+            "how can i ",
+            "can you explain",
+            "could you explain",
+            "please explain",
+            "help me",
+            "please help",
+        )
+        return normalized.startswith(guidance_starts)
+
+    @classmethod
+    def _is_content_generation_request(cls, text: str) -> bool:
+        """Recognize requests to draft content rather than control an app.
+
+        Mentioning an app as background (for example, "I'm working in Google
+        Docs") does not mean the user has asked Adele to type into it.  Keep
+        those requests on the no-tools ChatGPT path unless the user explicitly
+        asks to insert the content into a desktop surface.
+        """
+        normalized = " ".join(cls._visible_user_request(text).lower().split())
+        if not normalized or any(marker in normalized for marker in cls._DIRECT_SCREEN_QUESTION_MARKERS):
+            return False
+        if any(_re.search(pattern, normalized) for pattern in cls._DESKTOP_INSERTION_PATTERNS):
+            return False
+
+        noun_pattern = "|".join(_re.escape(noun) for noun in cls._CONTENT_REQUEST_NOUNS)
+        drafting_pattern = (
+            r"\b(?:help(?: me)?|can you|could you|please|would you)\s+"
+            r"(?:to\s+)?(?:write|draft|brainstorm|create|generate|come up with)\b"
+        )
+        direct_pattern = (
+            r"^\s*(?:write|draft|brainstorm|create|generate|summarize)\s+"
+            r"(?:me\s+)?(?:a|an|the)?\s*(?:" + noun_pattern + r")\b"
+        )
+        return bool(_re.search(drafting_pattern, normalized) or _re.search(direct_pattern, normalized))
+
     def _is_conversational(self, text: str) -> str | None:
         """
         Classify if text is small-talk that can skip the full pipeline.
         Returns the category string or None if it's a real task.
         """
+        text = self._visible_user_request(text)
         if self._GREETING_PATTERNS.match(text):
             return "greeting"
         if self._THANKS_PATTERNS.match(text):
@@ -388,6 +530,10 @@ class AdeleAgentV2:
             return "mood"
         if self._SIMPLE_FACTUAL.match(text):
             return "factual"
+        if self._is_content_generation_request(text):
+            return "creative_content"
+        if self._is_contextual_guidance_question(text):
+            return "contextual_guidance"
         return None
 
     async def _try_conversational_fast_path(
@@ -401,7 +547,8 @@ class AdeleAgentV2:
         without going through the full routing/planning pipeline.
         Returns (response_text, False) or None if not conversational.
         """
-        category = self._is_conversational(user_text)
+        visible_request = self._visible_user_request(user_text)
+        category = self._is_conversational(visible_request)
         if not category:
             return None
 
@@ -410,12 +557,35 @@ class AdeleAgentV2:
         # Get user's name for personalization
         user_name = self.user_profile.get_fact("name") or ""
 
+        async def return_template_response() -> tuple:
+            reply, _ = self._template_chat_response(category, user_name)
+            if ws_callback:
+                try:
+                    await tool_registry.execute("send_response", {"message": reply})
+                except Exception:
+                    pass
+                await ws_callback({
+                    "type": "response",
+                    "payload": {
+                        "text": reply,
+                        "display": "pill" if len(reply) <= 60 else "card",
+                        "app": context.active_app.lower() if context.active_app else "",
+                    },
+                })
+            return (reply, False)
+
+        # These replies do not need desktop context or a model turn. Keeping
+        # them local makes the first interaction immediate while Codex is cold
+        # without pretending to answer factual questions.
+        if category in {"greeting", "thanks", "farewell", "mood"}:
+            return await return_template_response()
+
         # Use fast tier for speed
         await self.router.initialize()
         provider = self.router.fast
         if not provider:
             # Fallback to template responses
-            return self._template_chat_response(category, user_name)
+            return await return_template_response()
 
         # Build a lightweight conversational prompt
         history = self.conversation.get_history()[-6:]
@@ -425,21 +595,46 @@ class AdeleAgentV2:
             parts = turn.get("parts", [])
             text = " ".join(p.get("text", "") for p in parts if isinstance(p, dict))
             if text:
-                history_text += f"{'User' if role == 'user' else 'ADELE'}: {text}\n"
+                clean_text = self._visible_user_request(text) if role == "user" else text
+                history_text += f"{'User' if role == 'user' else 'ADELE'}: {clean_text}\n"
 
         profile_hint = ""
         if user_name:
             profile_hint = f"The user's name is {user_name}. Use it naturally (not every time).\n"
 
+        context_hint = (
+            f"Current desktop context: active app is '{context.active_app or 'Unknown'}'; "
+            f"window title is '{context.window_title or 'Unknown'}'."
+        )
+        if context.page_title:
+            context_hint += f" Page title: '{context.page_title}'."
+        if context.visible_text:
+            context_hint += f" Visible page text: {context.visible_text[:800]}"
+
+        response_length = (
+            "For a writing or brainstorming request, provide a useful concise draft "
+            "of up to 250 words."
+            if category == "creative_content"
+            else "Keep responses short (1-2 sentences max), natural, and warm."
+        )
         system = (
             "You are ADELE, a friendly cross-platform desktop assistant. "
-            "Keep responses short (1-2 sentences max), natural, and warm. "
+            f"{response_length} "
             "Sound like a helpful friend, not a corporate bot. "
             "You're voice-first — write responses that sound natural when spoken aloud. "
             f"{profile_hint}"
         )
 
-        prompt = f"Conversation so far:\n{history_text}\nUser: {user_text}\n\nRespond naturally:"
+        system += (
+            " Answer guidance questions directly. Do not claim to see screen details "
+            "that are not present in the supplied desktop context, and do not perform "
+            "or promise any desktop action in this no-tools response."
+        )
+
+        prompt = (
+            f"{context_hint}\n\nConversation so far:\n{history_text}"
+            f"\nUser: {visible_request}\n\nRespond naturally:"
+        )
 
         try:
             response = await provider.generate(
@@ -447,15 +642,15 @@ class AdeleAgentV2:
                 system_prompt=system,
                 tools=[],
                 temperature=0.7,
-                thinking_level="MINIMAL",
+                thinking_level="LOW",
                 enable_builtin_tools=False,
             )
             reply = (response.text or "").strip() if response else ""
             if not reply:
-                return self._template_chat_response(category, user_name)
+                return await return_template_response()
         except Exception as e:
             print(f"[AgentV2] Fast path LLM error: {e}")
-            return self._template_chat_response(category, user_name)
+            return await return_template_response()
 
         # Deliver the response
         if ws_callback:
@@ -485,7 +680,13 @@ class AdeleAgentV2:
             "farewell": [f"See you{name_suffix}!", "Take care!", "Catch you later!"],
             "mood": ["I'm doing great, thanks for asking! What can I help with?", "All good here! What's up?"],
             "factual": ["Let me check that for you…"],
+            "creative_content": [
+                "I can help draft that. Tell me the tone or length you want, and I’ll write it with you."
+            ],
         }
+        templates["contextual_guidance"] = [
+            "I can help with that. Tell me what you want to accomplish, or ask me to look at your screen."
+        ]
         choices = templates.get(category, ["What can I help you with?"])
         reply = _random.choice(choices)
         self.conversation.add_model(reply)
@@ -653,6 +854,23 @@ class AdeleAgentV2:
     def _plan_unit_count(self, plan: MilestonePlan) -> int:
         return len(plan.milestones)
 
+    @staticmethod
+    def _plan_requires_provider(plan: MilestonePlan) -> bool:
+        """Return whether a plan needs GPT after deterministic planning.
+
+        Direct actions retain Adele's normal tool validation, approval, and
+        verification path. They do not need to start Codex just to select a
+        tool whose arguments are already bounded by the deterministic planner.
+        A web lookup is the exception because its source material is summarized
+        by the active ChatGPT provider after the gateway succeeds.
+        """
+        return any(
+            not str(getattr(milestone, "direct_tool", "") or "").strip()
+            or str(getattr(milestone, "direct_tool", "") or "").strip()
+            == "get_web_information"
+            for milestone in plan.milestones
+        )
+
     def _should_gate_plan(self, plan: MilestonePlan) -> bool:
         communication_tools = {"send_response", "await_reply"}
         read_only_tools = {
@@ -757,7 +975,7 @@ class AdeleAgentV2:
         self,
         pending: PendingPlanState,
         context: perception.ContextSnapshot,
-        provider: LLMProvider,
+        provider: Optional[LLMProvider],
         ws_callback: Optional[WSCallback],
         note: str = "",
     ) -> tuple[str, bool]:
@@ -803,7 +1021,7 @@ class AdeleAgentV2:
 
         return (await_msg, True)
 
-    async def run(
+    async def _run_impl(
         self,
         user_text: str,
         context: perception.ContextSnapshot,
@@ -821,15 +1039,17 @@ class AdeleAgentV2:
             Tuple of (response_text, awaiting_reply)
         """
         t_start = _time.time()
+        trace_id = f"trace_{uuid.uuid4().hex[:12]}"
+        visible_user_text = self._visible_user_request(user_text)
+        vault_context = self._vault_retrieval_context(user_text)
         print(f"\n[AgentV2] ═══ New Request ═══")
-        print(f"[AgentV2] Text: '{user_text}'")
-        print(f"[AgentV2] Context: app={context.active_app}, title={context.window_title}")
+        print("[AgentV2] Request context captured.")
 
         # Record user turn in conversation memory (for multi-turn context)
-        self.conversation.add_user(user_text)
+        self.conversation.add_user(visible_user_text)
 
         # Extract facts from user message into persistent profile
-        extracted = self.user_profile.extract_facts(user_text)
+        extracted = self.user_profile.extract_facts(visible_user_text)
         if extracted:
             print(f"[AgentV2] 📝 Extracted facts: {extracted}")
 
@@ -837,8 +1057,15 @@ class AdeleAgentV2:
         # FAST PATH: Small-talk / conversational (skip full pipeline)
         # ══════════════════════════════════════════════════════════════
         if not self._pending_plan and not self._pending_execution:
-            chat_result = await self._try_conversational_fast_path(user_text, context, ws_callback)
+            chat_result = await self._try_conversational_fast_path(visible_user_text, context, ws_callback)
             if chat_result is not None:
+                journal_request_trace(
+                    trace_id=trace_id,
+                    phase="completed",
+                    intent="conversation",
+                    route="fast_path",
+                    status="passed",
+                )
                 elapsed = _time.time() - t_start
                 print(f"[AgentV2] ⚡ Fast path: {elapsed:.2f}s")
                 return chat_result
@@ -850,8 +1077,8 @@ class AdeleAgentV2:
         # ══════════════════════════════════════════════════════════════
         # PHASE 1: SENSE — Build structured WorldState
         # ══════════════════════════════════════════════════════════════
-        world_state = await self._build_world_state(user_text, context)
-        self.log_screen_event(context, user_text)
+        world_state = await self._build_world_state(visible_user_text, context)
+        self.log_screen_event(context, visible_user_text)
         gateway_context = self._current_tool_gateway_context()
         set_tool_gateway_context(
             active_app=world_state.active_app,
@@ -866,7 +1093,7 @@ class AdeleAgentV2:
         set_automation_cursor_callback(ws_callback)
         print(f"[AgentV2] Intent: {world_state.intent.action.value if world_state.intent else 'unknown'}")
 
-        planning_request = user_text
+        planning_request = visible_user_text
 
         if self._pending_execution:
             pending_execution = self._pending_execution
@@ -875,7 +1102,7 @@ class AdeleAgentV2:
                 print(f"[AgentV2] Pending execution expired after {age:.1f}s; discarding state.")
                 self._pending_execution = None
             else:
-                followup = self._classify_pending_followup(user_text)
+                followup = self._classify_pending_followup(visible_user_text)
                 print(f"[AgentV2] Pending execution follow-up: {followup} ({pending_execution.execution_id})")
 
                 if followup == "cancel":
@@ -916,8 +1143,8 @@ class AdeleAgentV2:
                         return (error_msg, False)
 
                 resume_inputs = list(pending_execution.followup_inputs or [])
-                if user_text:
-                    resume_inputs.append(user_text)
+                if visible_user_text:
+                    resume_inputs.append(visible_user_text)
                 resume_request = pending_execution.original_user_request
                 if resume_inputs:
                     resume_request = (
@@ -977,7 +1204,7 @@ class AdeleAgentV2:
         # Pending-plan follow-up handling (approve/cancel/modify)
         if self._pending_plan:
             pending = self._pending_plan
-            followup = self._classify_pending_followup(user_text)
+            followup = self._classify_pending_followup(visible_user_text)
             print(f"[AgentV2] Pending plan follow-up: {followup} ({pending.plan_id})")
 
             if followup == "cancel":
@@ -1073,7 +1300,7 @@ class AdeleAgentV2:
                     print(f"[AgentV2] Pending plan stale ({stale_reason}) but refresh already used; executing frozen plan.")
 
                 provider = pending.provider
-                if provider is None:
+                if provider is None and self._plan_requires_provider(pending.plan):
                     try:
                         decision = await self.router.route(
                             pending.original_user_request,
@@ -1110,7 +1337,7 @@ class AdeleAgentV2:
             previous_request = pending.original_user_request
             self._pending_plan = None
             planning_request = (
-                f"{user_text}\n\n"
+                f"{visible_user_text}\n\n"
                 "Previous proposed plan (modify this):\n"
                 f"{previous_plan}\n\n"
                 "Original request:\n"
@@ -1121,6 +1348,98 @@ class AdeleAgentV2:
         # ══════════════════════════════════════════════════════════════
         # ROUTING — Select model tier
         # ══════════════════════════════════════════════════════════════
+        # Fast local path: identify deterministic one-step actions before
+        # starting the Codex App Server. This retains the same tool registry,
+        # approval gate, and verifier used by the normal execution path.
+        if self._pending_reply_provider is None:
+            if self.planner is None:
+                self.planner = TaskPlanner(provider=None, tool_registry=tool_registry)
+
+            world_state.task_graph = self.planner.intent_parser.extract_task_graph(
+                planning_request,
+                world_state,
+            )
+            selected_tools, llm_tool_declarations = self._select_tool_surface(
+                planning_request,
+                context,
+                world_state,
+            )
+            direct_plan = self.planner.build_direct_action_plan(
+                user_request=planning_request,
+                world_state=world_state,
+                available_tools=selected_tools,
+            )
+
+            if direct_plan is not None and not self._plan_requires_provider(direct_plan):
+                intent = world_state.intent
+                selected_route = "direct_local"
+                journal_request_trace(
+                    trace_id=trace_id,
+                    phase="routing",
+                    intent=intent.action.value if intent else "unknown",
+                    target_type=intent.target_type.value if intent else "unknown",
+                    route=selected_route,
+                    tool_names=selected_tools,
+                    status="selected",
+                )
+                milestone_plan = self._enforce_plan_tool_contract(
+                    direct_plan,
+                    llm_tool_declarations,
+                )
+                print(f"[AgentV2] Direct local path: {milestone_plan.task_summary}")
+
+                if self._should_gate_plan(milestone_plan):
+                    pending = PendingPlanState(
+                        plan_id=uuid.uuid4().hex[:10],
+                        plan=milestone_plan,
+                        created_at=_time.time(),
+                        context_fingerprint=self._context_fingerprint(context),
+                        provider=None,
+                        original_user_request=planning_request,
+                        selected_tools=list(selected_tools),
+                    )
+                    self._pending_plan = pending
+                    journal_pending_approval(
+                        plan_id=pending.plan_id,
+                        plan_dict=pending.plan.to_dict(),
+                        original_user_request=pending.original_user_request,
+                    )
+                    return await self._show_plan_gate(
+                        pending=pending,
+                        context=context,
+                        provider=None,
+                        ws_callback=ws_callback,
+                    )
+
+                if ws_callback:
+                    first_goal = milestone_plan.milestones[0].goal if milestone_plan.milestones else "Working"
+                    await ws_callback({"type": "doing", "text": first_goal, "tool": "executor"})
+
+                final_response, awaiting = await self._execute_milestone_plan(
+                    plan=milestone_plan,
+                    world_state=world_state,
+                    provider=None,
+                    context=context,
+                    user_text=planning_request,
+                    llm_tool_declarations=llm_tool_declarations,
+                    ws_callback=ws_callback,
+                    thinking_level="LOW",
+                    show_milestone_progress=False,
+                    trace_id=trace_id,
+                )
+                journal_request_trace(
+                    trace_id=trace_id,
+                    phase="completed",
+                    intent=intent.action.value if intent else "unknown",
+                    target_type=intent.target_type.value if intent else "unknown",
+                    route=selected_route,
+                    tool_names=selected_tools,
+                    status="awaiting_input" if awaiting else "completed",
+                )
+                print(f"[AgentV2] Direct local total: {_time.time() - t_start:.2f}s")
+                return (final_response, awaiting)
+
+        provider: Optional[LLMProvider] = None
         if self._pending_reply_provider:
             provider = self._pending_reply_provider
             self._pending_reply_provider = None
@@ -1128,7 +1447,7 @@ class AdeleAgentV2:
         else:
             # ── Instant acknowledgment ──
             if ws_callback:
-                ack = self._pick_ack(user_text)
+                ack = self._pick_ack(visible_user_text)
                 await ws_callback({"type": "ack", "text": ack})
 
             # Immediate feedback while routing LLM runs
@@ -1144,6 +1463,13 @@ class AdeleAgentV2:
                 print(f"[AgentV2] Using {provider.name} ({decision.reason})")
             except RuntimeError as e:
                 error_msg = str(e)
+                journal_request_trace(
+                    trace_id=trace_id,
+                    phase="routing",
+                    route="provider",
+                    status="failed",
+                    error_code=_trace_error_code(error_msg),
+                )
                 if ws_callback:
                     await ws_callback({
                         "type": "response",
@@ -1172,23 +1498,73 @@ class AdeleAgentV2:
             context,
             world_state,
         )
+        intent = world_state.intent
+        selected_route = "web_research" if "get_web_information" in selected_tools else "agent_planning"
+        journal_request_trace(
+            trace_id=trace_id,
+            phase="routing",
+            intent=intent.action.value if intent else "unknown",
+            target_type=intent.target_type.value if intent else "unknown",
+            route=selected_route,
+            tool_names=selected_tools,
+            status="selected",
+        )
 
-        # Stream progress immediately — don't wait for the LLM
-        if ws_callback:
-            await ws_callback({"type": "doing", "text": "Planning…", "tool": "planner"})
-
-        milestone_plan = await self.planner.create_milestone_plan(
+        direct_plan = self.planner.build_direct_action_plan(
             user_request=planning_request,
             world_state=world_state,
-            conversation_history=self.conversation.get_history(),
             available_tools=selected_tools,
         )
-        if milestone_plan is None:
-            milestone_plan = MilestonePlan(
-                task_summary=planning_request,
-                needs_clarification=True,
-                clarification_prompt="I couldn't generate a milestone plan for that. Please try rephrasing it.",
+        needs_high_effort = self.planner.should_use_milestones(
+            planning_request,
+            task_graph=world_state.task_graph,
+        )
+
+        if direct_plan is not None:
+            milestone_plan = direct_plan
+            needs_high_effort = False
+            print(f"[AgentV2] Direct action path: {milestone_plan.task_summary}")
+        else:
+            # Stream progress immediately — don't wait for the LLM.
+            # Small, single-step requests use LOW effort; complex requests use HIGH.
+            if ws_callback:
+                status_text = "Planning…" if needs_high_effort else "Working…"
+                await ws_callback({"type": "doing", "text": status_text, "tool": "planner"})
+
+            milestone_plan = await self.planner.create_milestone_plan(
+                user_request=planning_request,
+                world_state=world_state,
+                conversation_history=self.conversation.get_history(),
+                available_tools=selected_tools,
+                supplemental_context=vault_context,
+                thinking_level="HIGH" if needs_high_effort else "LOW",
             )
+        if milestone_plan is None:
+            failure_code = getattr(self.planner, "last_failure", None) or "no_plan"
+            journal_request_trace(
+                trace_id=trace_id,
+                phase="planning",
+                intent=intent.action.value if intent else "unknown",
+                target_type=intent.target_type.value if intent else "unknown",
+                route=selected_route,
+                tool_names=selected_tools,
+                status="failed",
+                error_code=_trace_error_code(failure_code),
+            )
+            print(f"[AgentV2] Planning unavailable ({failure_code}); returning to idle.")
+            fallback = self._planner_unavailable_message(world_state.intent)
+            self.conversation.add_model(fallback)
+            if ws_callback:
+                await ws_callback({
+                    "type": "response",
+                    "payload": {
+                        "text": fallback,
+                        "display": "card",
+                        "app": context.active_app.lower() if context.active_app else "",
+                    },
+                })
+            print(f"[AgentV2] ⏱ TOTAL: {_time.time() - t_start:.2f}s")
+            return (fallback, False)
         milestone_plan = self._enforce_plan_tool_contract(milestone_plan, llm_tool_declarations)
 
         print(f"[AgentV2] Milestone plan: {milestone_plan.task_summary} "
@@ -1244,15 +1620,39 @@ class AdeleAgentV2:
             context=context,
             user_text=planning_request,
             llm_tool_declarations=llm_tool_declarations,
-            ws_callback=ws_callback
+            ws_callback=ws_callback,
+            thinking_level="MEDIUM" if needs_high_effort else "LOW",
+            show_milestone_progress=needs_high_effort,
+            trace_id=trace_id,
         )
 
         print(f"[AgentV2] ⏱ TOTAL: {_time.time() - t_start:.2f}s")
 
         # ── Background memory curator: decide what to persist ──
-        asyncio.ensure_future(self._curate_vault(user_text, final_response))
+        journal_request_trace(
+            trace_id=trace_id,
+            phase="completed",
+            intent=intent.action.value if intent else "unknown",
+            target_type=intent.target_type.value if intent else "unknown",
+            route=selected_route,
+            tool_names=selected_tools,
+            status="awaiting_input" if awaiting else "completed",
+        )
+        asyncio.ensure_future(self._curate_vault(visible_user_text, final_response))
 
         return (final_response, awaiting)
+
+    async def run(
+        self,
+        user_text: str,
+        context: perception.ContextSnapshot,
+        ws_callback: Optional[WSCallback] = None,
+    ) -> tuple:
+        """Run a request and always remove its temporary visual capture."""
+        try:
+            return await self._run_impl(user_text, context, ws_callback)
+        finally:
+            perception.delete_temporary_screenshot(context.screenshot_path)
 
     async def _curate_vault(self, user_text: str, agent_response: str) -> None:
         """Background curator: review the conversation and decide what to persist.
@@ -1343,44 +1743,8 @@ class AdeleAgentV2:
             print(f"[AgentV2] ⚠ Curator error (non-fatal): {e}")
 
     def log_screen_event(self, context: perception.ContextSnapshot, user_text: str):
-        """Log screen event to MongoDB's screen_events collection."""
-        from agent.memory import get_mongo_db
-        db = get_mongo_db()
-        if db is not None:
-            try:
-                # Extract screen summary
-                screen_summary = f"App: {context.active_app}, Window: {context.window_title}"
-                if context.browser_url:
-                    screen_summary += f", URL: {context.browser_url}"
-
-                # Detect potential problems (e.g., if error words are in visible text or title)
-                detected_problems = []
-                visible_lower = (context.visible_text or "").lower()
-                title_lower = (context.window_title or "").lower()
-                for term in ["error", "failed", "crash", "exception", "not found", "404", "denied"]:
-                    if term in visible_lower or term in title_lower:
-                        detected_problems.append(term)
-
-                event_doc = {
-                    "timestamp": context.timestamp or _time.time(),
-                    "active_app": context.active_app or "",
-                    "window_title": context.window_title or "",
-                    "browser_url": context.browser_url,
-                    "page_path": urlparse(context.browser_url).path if context.browser_url else "",
-                    "screen_summary": screen_summary,
-                    "source_session": self.conversation._session_id,
-                    "detected_problems": detected_problems,
-                    "user_text_context": user_text,
-                    "metadata": {
-                        "page_title": context.page_title or "",
-                        "has_screenshot": context.screenshot_path is not None,
-                        "clipboard_preview": context.clipboard[:100] if context.clipboard else None
-                    }
-                }
-                db.screen_events.insert_one(event_doc)
-                print(f"[MongoDB] Logged screen event: {screen_summary[:80]}")
-            except Exception as e:
-                print(f"[MongoDB] Failed to log screen event: {e}")
+        """Legacy hook retained for callers; screen events are not persisted."""
+        del context, user_text
 
     async def _build_world_state(
         self,
@@ -1455,6 +1819,41 @@ class AdeleAgentV2:
         
         return (prompt, True)
 
+    @staticmethod
+    def _planner_unavailable_message(intent: Optional[UserIntent]) -> str:
+        """Keep planner faults out of the user-facing voice experience."""
+        if intent is None or intent.action in {
+            IntentAction.UNKNOWN,
+            IntentAction.QUERY,
+            IntentAction.ANALYZE,
+        }:
+            return (
+                "I didn't catch a clear task. Try a short request such as "
+                "“open Spotify” or “summarize this text.”"
+            )
+        return (
+            "I couldn't complete that request from the current context. "
+            "Try a short, specific command such as “open Spotify.”"
+        )
+
+    @staticmethod
+    def _milestone_failure_message(
+        failed: list[Milestone],
+        completed: list[Milestone],
+    ) -> str:
+        """Describe an execution outcome without exposing planner-only goals.
+
+        Milestone goals are internal instructions, not user-facing explanations.
+        A cancellation means no cause was verified, so it must not be presented as
+        a diagnosis. Other failures are intentionally kept generic unless a tool
+        has supplied a separately validated response.
+        """
+        if any("cancelled by user" in (milestone.error or "").lower() for milestone in failed):
+            return "That request was stopped before it finished, so I couldn't verify the result."
+        if completed:
+            return "I completed part of that request, but I couldn't verify the remaining result."
+        return "I couldn't complete that request or verify a successful result."
+
     # ═══════════════════════════════════════════════════════════════
     #  Adaptive Plan Execution (LLM-in-the-loop)
     # ═══════════════════════════════════════════════════════════════
@@ -1517,6 +1916,9 @@ class AdeleAgentV2:
         ws_callback: Optional[WSCallback],
         pending_execution: Optional[PendingExecutionState] = None,
         followup_inputs: Optional[list[str]] = None,
+        thinking_level: str = "MEDIUM",
+        show_milestone_progress: bool = True,
+        trace_id: str = "",
     ) -> tuple:
         """Execute a milestone-based plan using the LLM micro-loop.
 
@@ -1591,13 +1993,6 @@ class AdeleAgentV2:
             except Exception as e:
                 print(f"[AgentV2] ⚠ DOM snapshot for visual context failed: {e}")
 
-            try:
-                screenshot_path = await perception.capture_screenshot()
-                if screenshot_path:
-                    parts.append(f"Screenshot captured: {screenshot_path}")
-            except Exception as e:
-                print(f"[AgentV2] ⚠ Screenshot for visual context failed: {e}")
-
             return "\n".join(parts) if parts else ""
 
         async def milestone_env_perceiver() -> dict:
@@ -1667,6 +2062,18 @@ class AdeleAgentV2:
                 task_summary=plan.task_summary or "",
             )
             result = str(temp_step.result or "") if success else str(temp_step.error or "")
+            if trace_id:
+                intent = world_state.intent
+                journal_request_trace(
+                    trace_id=trace_id,
+                    phase="tool_verification",
+                    intent=intent.action.value if intent else "unknown",
+                    target_type=intent.target_type.value if intent else "unknown",
+                    route="web_research" if tool == "get_web_information" else "agent_execution",
+                    tool_names=[tool],
+                    status="passed" if success else "failed",
+                    error_code="" if success else _trace_error_code(result),
+                )
 
             if success and tool == "await_reply":
                 last_await_payload = dict(temp_step.modal_data or {})
@@ -1732,7 +2139,7 @@ class AdeleAgentV2:
 
             plan.mark_milestone_in_progress(milestone.id)
 
-            if ws_callback:
+            if ws_callback and show_milestone_progress:
                 total_m = len(plan.milestones)
                 progress_idx = next(
                     (i + 1 for i, m in enumerate(plan.milestones) if m.id == milestone.id),
@@ -1744,6 +2151,42 @@ class AdeleAgentV2:
                     "tool": "milestone",
                 })
 
+            # A direct plan has already supplied validated arguments and has
+            # passed Adele's normal approval gate.  Do not send a one-step
+            # typing action back through the model micro-loop: the overlay can
+            # steal focus while it deliberates, causing text to land nowhere.
+            direct_tool = str(getattr(milestone, "direct_tool", "") or "").strip()
+            if direct_tool:
+                milestone.actions_taken = 1
+                result, success = await tool_executor(
+                    direct_tool,
+                    dict(getattr(milestone, "direct_tool_args", {}) or {}),
+                )
+                if direct_tool == "browser_list_tabs":
+                    safe_response, route_status = self._browser_tab_query_response(result)
+                    # Keep browser URLs and tab titles out of the milestone
+                    # journal and response for a count-only request.
+                    plan.final_response = safe_response
+                    print(
+                        "[AgentV2] Browser tab query diagnostic: "
+                        f"route=browser_list_tabs status={route_status}"
+                    )
+                    return success, safe_response
+                if direct_tool == "get_web_information":
+                    if not success:
+                        return False, (
+                            "I couldn't verify current information from a web source. "
+                            "Please try again in a moment."
+                        )
+                    safe_response = await self._summarize_current_information(
+                        provider=provider,
+                        user_text=user_text,
+                        gateway_result=result,
+                    )
+                    plan.final_response = safe_response
+                    return True, safe_response
+                return success, result
+
             success, result_summary = await executor.execute_milestone(
                 milestone=milestone,
                 plan=plan,
@@ -1754,6 +2197,7 @@ class AdeleAgentV2:
                 request_scope_tool_names=request_scope_tool_names,
                 blocked_await_signatures=blocked_await_signatures,
                 ws_callback=ws_callback,
+                thinking_level=thinking_level,
             )
 
             # Detect await_reply suspension — raise a sentinel so the outer
@@ -1789,12 +2233,15 @@ class AdeleAgentV2:
         )
 
         try:
-            deliverables = await sub_manager.dispatch(
-                plan=plan,
-                existing_deliverables=deliverables,
-                execute_fn=milestone_execute_fn,
-                replan_fn=self.planner.replan_remaining if (self.planner and not is_research) else None,
-            )
+            from agent.vision_harness import use_vision_provider
+
+            with use_vision_provider(provider):
+                deliverables = await sub_manager.dispatch(
+                    plan=plan,
+                    existing_deliverables=deliverables,
+                    execute_fn=milestone_execute_fn,
+                    replan_fn=self.planner.replan_remaining if (self.planner and not is_research) else None,
+                )
         except _AwaitReplySignal as sig:
             # A milestone requested a reply from the user — suspend execution.
             self._pending_execution = PendingExecutionState(
@@ -1863,8 +2310,7 @@ class AdeleAgentV2:
                 if last_deliv and len(last_deliv) > 10:
                     final_response = last_deliv
         elif plan.has_failed():
-            failed_goals = [m.goal for m in failed]
-            final_response = f"Sorry, I couldn't complete: {', '.join(failed_goals[:3])}"
+            final_response = self._milestone_failure_message(failed, completed)
         else:
             final_response = f"Partially completed ({len(completed)}/{len(plan.milestones)} milestones)."
 
@@ -1918,6 +2364,97 @@ class AdeleAgentV2:
         )
 
         return (final_response, False)
+
+    @staticmethod
+    def _browser_tab_query_response(result: str) -> tuple[str, str]:
+        """Build a count-only browser response without retaining tab metadata."""
+        try:
+            payload = json.loads(result or "{}")
+        except (TypeError, ValueError):
+            return (
+                "I couldn't read the current Chrome tab count. Please check that the ADELE Browser Bridge extension is connected.",
+                "invalid_result",
+            )
+
+        if payload.get("status") == "browser_bridge_unavailable":
+            return (
+                "I can't inspect your Chrome tabs because the ADELE Browser Bridge extension is not connected. I did not open Chrome.",
+                "bridge_unavailable",
+            )
+
+        try:
+            count = max(0, int(payload.get("count", 0)))
+        except (TypeError, ValueError):
+            return (
+                "I couldn't read the current Chrome tab count. Please check that the ADELE Browser Bridge extension is connected.",
+                "invalid_count",
+            )
+        noun = "tab" if count == 1 else "tabs"
+        return (f"You have {count} open Chrome {noun}.", "ok")
+
+    @staticmethod
+    def _current_information_source_text(gateway_result: str) -> str:
+        """Extract source text from the web gateway without exposing its metadata."""
+        try:
+            payload = json.loads(gateway_result or "{}")
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(payload, dict) or payload.get("ok") is False:
+            return ""
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        chunks: list[str] = []
+        for key in ("title", "summary", "content"):
+            value = str(data.get(key, "") or "").strip()
+            if value:
+                chunks.append(value)
+        items = data.get("items", [])
+        if isinstance(items, list):
+            for item in items[:5]:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or item.get("title") or "").strip()
+                snippet = str(item.get("snippet") or item.get("text") or "").strip()
+                combined = " — ".join(part for part in (label, snippet) if part)
+                if combined:
+                    chunks.append(combined)
+        return "\n\n".join(chunks)[:9000]
+
+    async def _summarize_current_information(
+        self,
+        *,
+        provider: LLMProvider,
+        user_text: str,
+        gateway_result: str,
+    ) -> str:
+        """Answer a live factual question using only verified gateway content."""
+        source_text = self._current_information_source_text(gateway_result)
+        if not source_text:
+            return "I couldn't verify current information from a web source. Please try again in a moment."
+
+        prompt = (
+            f"Question: {user_text}\n\n"
+            "Use only the source material below to answer the question concisely. "
+            "Do not add facts from memory. If the material does not establish an "
+            "answer, say that it could not be verified.\n\n"
+            f"Source material:\n{source_text}"
+        )
+        try:
+            response = await provider.generate(
+                messages=[{"role": "user", "parts": [{"text": prompt}]}],
+                system_prompt=(
+                    "You are ADELE. Give a short, factual, source-grounded answer. "
+                    "Never reveal hidden reasoning."
+                ),
+                tools=[],
+                temperature=0.1,
+                thinking_level="LOW",
+            )
+            answer = str(getattr(response, "text", "") or "").strip()
+            if answer:
+                return answer[:6000]
+        except Exception:
+            pass
+        return "I found current source material, but I couldn't summarize it reliably. Please try again."
 
     def _looks_like_research_doc_task(self, user_text: str, task_summary: str) -> bool:
         """Delegate to the planner's canonical implementation."""
@@ -2482,8 +3019,16 @@ class AdeleAgentV2:
                 except Exception:
                     pass
 
-            # Execute the tool
-            result = await tool_registry.execute(step.tool, step.args)
+            # Screen analysis always runs through the ChatGPT provider selected
+            # for this request. It never falls back to a second model client.
+            if step.tool == "read_screen":
+                from agent.vision_harness import analyze_screen
+
+                result = await analyze_screen(
+                    question=str(step.args.get("question") or ""),
+                )
+            else:
+                result = await tool_registry.execute(step.tool, step.args)
             elapsed = _time.time() - t_start
             self._remember_opened_url(step, result)
 
@@ -2534,10 +3079,14 @@ class AdeleAgentV2:
 
             result = await self._recover_browser_context(step, result)
             
-            # Log tool output (truncated for readability)
-            result_preview = result[:200].replace("\n", " ↵ ") if result else "(empty)"
-            print(f"[AgentV2] │  Output: {result_preview}{'…' if len(result) > 200 else ''}")
-            print(f"[AgentV2] │  Output length: {len(result)} chars")
+            # Screen descriptions may contain sensitive on-screen content. The
+            # response is returned to the user, but never copied to diagnostics.
+            if step.tool == "read_screen":
+                print("[AgentV2] │  Output: [screen analysis redacted]")
+            else:
+                result_preview = result[:200].replace("\n", " ↵ ") if result else "(empty)"
+                print(f"[AgentV2] │  Output: {result_preview}{'…' if len(result) > 200 else ''}")
+                print(f"[AgentV2] │  Output length: {len(result)} chars")
 
             # ── Research logging & content extraction ──
             is_research = self._looks_like_research_doc_task(user_text, task_summary)
@@ -2628,7 +3177,7 @@ class AdeleAgentV2:
                         emit_stream=False,
                         commit_to_memory=True,
                     )
-                if step.tool not in ("send_response", "await_reply"):
+                if step.tool not in ("send_response", "await_reply", "read_screen"):
                     self.working_memory.log_action(
                         tool=step.tool,
                         args=step.args,

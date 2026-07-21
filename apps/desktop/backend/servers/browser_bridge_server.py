@@ -196,6 +196,18 @@ async def bridge_handler(websocket):
                 })
                 continue
 
+            if msg_type == "browser_tab_inventory":
+                raw_tabs = data.get("tabs", [])
+                tabs = raw_tabs if isinstance(raw_tabs, list) else []
+                browser_bridge.register_tab_inventory(tabs, session_id)
+                await _send(websocket, {
+                    "type": "browser_tab_inventory_ack",
+                    "ok": True,
+                    "session_id": session_id,
+                    "count": len(tabs),
+                })
+                continue
+
             if msg_type == "browser_poll_actions":
                 actions = browser_bridge.drain_actions(session_id)
                 await _send(websocket, {

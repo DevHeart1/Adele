@@ -53,4 +53,14 @@ exports.default = async function stampWindowsIcon(context) {
   resources.outputResource(exe);
   fs.writeFileSync(exePath, Buffer.from(exe.generate()));
   console.log(`[stamp-windows-icon] Stamped ADELE icon and version metadata into ${exePath}`);
+
+  // The helper is optional: the island is disabled by default and the core app
+  // must package normally on machines without Rust. A release that explicitly
+  // runs build:island:win carries the helper alongside other resources.
+  const bridgeSource = path.join(context.packager.projectDir, "build", "island", "adele-island-bridge.exe");
+  if (fs.existsSync(bridgeSource)) {
+    const bridgeTarget = path.join(context.appOutDir, "resources", "adele-island-bridge.exe");
+    fs.copyFileSync(bridgeSource, bridgeTarget);
+    console.log(`[stamp-windows-icon] Added optional island bridge: ${bridgeTarget}`);
+  }
 };

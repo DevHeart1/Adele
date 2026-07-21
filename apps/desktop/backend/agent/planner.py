@@ -64,6 +64,12 @@ class Milestone:
     depends_on: List[int] = field(default_factory=list)
     deliverable_key: str = ""
 
+    # Deterministic direct actions use these runtime-only fields after the
+    # ordinary approval gate. They are intentionally not serialized into the
+    # plan journal, which prevents command payloads from being retained there.
+    direct_tool: str = ""
+    direct_tool_args: Dict[str, Any] = field(default_factory=dict)
+
     # Runtime state
     status: MilestoneStatus = MilestoneStatus.PENDING
     actions_taken: int = 0

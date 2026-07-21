@@ -11,6 +11,7 @@ backend_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 sys.path.insert(0, backend_path)
 
 from agent.verifier import ToolVerifier
+import tools.mac_tools as mac_tools
 
 
 def _verify(tool_name: str, tool_result: str, tool_args: Optional[dict] = None):
@@ -167,6 +168,61 @@ def test_verify_get_ui_tree_timeout_fails():
         {"app_name": "WhatsApp"},
     )
     assert verification.success is False
+
+
+def test_verify_quit_app_rejects_error_that_contains_quit_word():
+    verification = _verify(
+        "quit_app",
+        "Could not quit ADELE: process is still running.",
+        {"app_name": "ADELE"},
+    )
+    assert verification.success is False
+    assert verification.should_retry is True
+
+
+def test_verify_quit_app_accepts_only_verified_exit_result():
+    verification = _verify(
+        "quit_app",
+        "Quit ADELE.",
+        {"app_name": "ADELE"},
+    )
+    assert verification.success is True
+    assert "no longer running" in verification.message
+
+
+def test_windows_quit_app_confirms_process_has_exited(monkeypatch):
+    class FakeProcess:
+        def __init__(self, returncode, stdout=b"", stderr=b""):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return self._stdout, self._stderr
+
+    calls = []
+    tasklist_calls = 0
+
+    async def fake_create_subprocess_exec(*args, **_kwargs):
+        nonlocal tasklist_calls
+        calls.append(args)
+        if args[0] == "tasklist":
+            tasklist_calls += 1
+            # First check finds ADELE; post-taskkill check confirms it exited.
+            output = b"ADELE.exe 1234 Console" if tasklist_calls == 1 else b"INFO: No tasks are running"
+            return FakeProcess(0, stdout=output)
+        assert args[:2] == ("taskkill", "/IM")
+        return FakeProcess(0)
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(mac_tools.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(mac_tools.asyncio, "sleep", no_sleep)
+    result = asyncio.run(mac_tools.quit_app("ADELE"))
+
+    assert result == "Quit ADELE."
+    assert any(call[0] == "taskkill" for call in calls)
 
 
 def test_verify_gdocs_create_partial_success_requests_same_doc_repair():

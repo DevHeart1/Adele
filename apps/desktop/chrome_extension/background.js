@@ -6,7 +6,7 @@
 
 // Defaults — overridden by chrome.storage.sync settings
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:8765";
-const DEFAULT_BRIDGE_TOKEN = "dev-bridge-token";
+const DEFAULT_BRIDGE_TOKEN = "";
 const EXTENSION_NAME = "adele-browser-bridge";
 
 const ACTION_POLL_INTERVAL_MS = 5000;  // Fallback only — actions pushed via WebSocket
@@ -516,6 +516,7 @@ function connectBridge() {
         if (authenticated) {
           startActionPolling();
           startKeepalive();
+          await publishTabInventory();
           await pushActiveTabSnapshot();
           await pollBridgeActions();
         } else {
@@ -530,6 +531,16 @@ function connectBridge() {
 
       if (message.type === "browser_snapshot_ack") {
         lastBridgeMessage = `Snapshot accepted (${message.elements || 0} elements)`;
+        return;
+      }
+
+      if (message.type === "browser_tab_inventory_ack") {
+        lastBridgeMessage = `Tab inventory accepted (${message.count || 0} tabs)`;
+        return;
+      }
+
+      if (message.type === "browser_tab_inventory_request") {
+        await publishTabInventory();
         return;
       }
 
@@ -598,6 +609,40 @@ async function getActiveTab() {
   return tabs[0] || null;
 }
 
+async function publishTabInventory() {
+  if (!authenticated) return false;
+  try {
+    const tabs = await chrome.tabs.query({});
+    const inventory = tabs
+      .filter((tab) => Number.isInteger(tab?.id))
+      .map((tab) => ({
+        tab_id: String(tab.id),
+        url: String(tab.url || ""),
+        title: String(tab.title || ""),
+        window_id: String(tab.windowId || ""),
+        active: Boolean(tab.active),
+      }));
+    return sendToBridge({
+      type: "browser_tab_inventory",
+      session_id: sessionId,
+      tabs: inventory,
+    });
+  } catch (error) {
+    lastBridgeError = String(error?.message || error);
+    lastBridgeMessage = "Tab inventory failed";
+    log("Tab inventory failed", error);
+    return false;
+  }
+}
+
+function refreshTabInventory() {
+  if (authenticated) {
+    publishTabInventory().catch((error) => {
+      log("Tab inventory refresh failed", error);
+    });
+  }
+}
+
 async function pushActiveTabSnapshot() {
   const tab = await getActiveTab();
   if (!tab?.id) return;
@@ -620,6 +665,7 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.tabs.onActivated.addListener(() => {
   if (authenticated) {
     pushActiveTabSnapshot();
+    refreshTabInventory();
   }
 });
 
@@ -628,8 +674,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     requestSnapshotFromTab(tabId, sessionId).catch((error) => {
       log("Snapshot refresh failed after tab update", error);
     });
+    refreshTabInventory();
   }
 });
+
+chrome.tabs.onCreated.addListener(refreshTabInventory);
+chrome.tabs.onRemoved.addListener(refreshTabInventory);
+chrome.tabs.onMoved.addListener(refreshTabInventory);
+chrome.tabs.onAttached.addListener(refreshTabInventory);
+chrome.tabs.onDetached.addListener(refreshTabInventory);
 
 // ── Internal Message Handling ──
 

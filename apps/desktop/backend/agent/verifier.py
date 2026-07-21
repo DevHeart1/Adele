@@ -37,6 +37,7 @@ def _looks_like_ui_lookup_failure(text: str) -> bool:
         "error in type_in_field",
         "failed to type text",
         "failed to paste text",
+        "failed to focus target app",
     )
     return any(marker in normalized for marker in failure_markers)
 
@@ -95,8 +96,11 @@ class ToolVerifier:
         "run_shell",
     })
 
-    def __init__(self):
+    def __init__(self, router=None):
         """Initialize with tool-specific verifiers."""
+        # Injected by AdeleAgentV2. Visual checks share its already-running
+        # Codex provider instead of starting another App Server process.
+        self._router = router
         # Map tool names to verification methods
         self._verifiers: Dict[str, Callable] = {
             "open_app": self._verify_open_app,
@@ -135,6 +139,45 @@ class ToolVerifier:
             "play_media": self._verify_play_media,
             "run_shortcut": self._verify_run_shortcut,
         }
+
+    def set_router(self, router) -> None:
+        """Attach the owning agent's shared provider router."""
+        self._router = router
+
+    @staticmethod
+    def _visual_attachment(visual_summary: str) -> tuple[str, Optional[bytes], str]:
+        """Read a temporary capture while keeping its path out of model input."""
+        screenshot_path = ""
+        image_bytes: Optional[bytes] = None
+        match = re.search(r"Screenshot(?: captured)?: ([^\n]+)", visual_summary)
+        if match:
+            screenshot_path = match.group(1).strip()
+            # Redact the local filename before this summary reaches the model
+            # or any provider trace.
+            visual_summary = (
+                visual_summary[:match.start()]
+                + "Screenshot: attached image."
+                + visual_summary[match.end():]
+            )
+            try:
+                import os
+                from agent.perception import is_temporary_screenshot
+                if is_temporary_screenshot(screenshot_path) and os.path.isfile(screenshot_path):
+                    with open(screenshot_path, "rb") as capture:
+                        image_bytes = capture.read()
+            except OSError:
+                image_bytes = None
+        return visual_summary, image_bytes, screenshot_path
+
+    @staticmethod
+    def _cleanup_visual_attachment(screenshot_path: str) -> None:
+        if not screenshot_path:
+            return
+        try:
+            from agent.perception import delete_temporary_screenshot
+            delete_temporary_screenshot(screenshot_path)
+        except Exception:
+            pass
 
     async def verify(
         self,
@@ -232,8 +275,8 @@ class ToolVerifier:
                     )
                     if visual_result is not None:
                         return visual_result
-            except Exception as e:
-                print(f"[Verifier] ⚠ Visual verification failed for {tool_name}: {e}")
+            except Exception:
+                print(f"[Verifier] Visual verification unavailable for {tool_name}.")
 
         return string_result
 
@@ -267,11 +310,11 @@ class ToolVerifier:
                 success_signal=success_signal,
                 visual_summary=visual_summary,
             )
-        except Exception as e:
-            print(f"[Verifier] ⚠ Milestone visual verification error: {e}")
+        except Exception:
+            print("[Verifier] Milestone visual verification unavailable.")
             return VerificationResult(
                 success=True, confidence=0.5,
-                message=f"Milestone visual check failed ({e}) — trusting LLM"
+                message="Milestone visual check unavailable — trusting completion claim"
             )
 
     async def _evaluate_visual_evidence(
@@ -282,9 +325,12 @@ class ToolVerifier:
         visual_summary: str,
     ) -> Optional[VerificationResult]:
         """Use visual evidence to override string-based verdict for UI tools."""
+        screenshot_path = ""
         try:
-            from providers.router import ModelRouter
-            router = _get_shared_router()
+            visual_summary, image_bytes, screenshot_path = self._visual_attachment(visual_summary)
+            router = self._router
+            if router is None:
+                return None
 
             args_preview = str(tool_args)[:200]
             prompt = (
@@ -295,19 +341,6 @@ class ToolVerifier:
                 f"Based on the visual state, did the action actually succeed? "
                 f"Reply with ONLY 'YES' or 'NO' followed by a single-sentence reason."
             )
-
-            import re
-            import os
-            image_bytes = None
-            match = re.search(r"Screenshot(?: captured)?: ([^\n]+)", visual_summary)
-            if match:
-                screenshot_path = match.group(1).strip()
-                if os.path.exists(screenshot_path):
-                    try:
-                        with open(screenshot_path, "rb") as f:
-                            image_bytes = f.read()
-                    except Exception as e:
-                        print(f"[Verifier] ⚠ Failed to read screenshot bytes: {e}")
 
             response = await router.route_and_call(
                 user_message=prompt,
@@ -339,9 +372,11 @@ class ToolVerifier:
                     should_retry=string_result.should_retry,
                     suggested_fix=string_result.suggested_fix,
                 )
-        except Exception as e:
-            print(f"[Verifier] ⚠ Visual evaluation LLM call failed: {e}")
-        return None
+        except Exception:
+            print("[Verifier] Visual evaluation unavailable.")
+            return None
+        finally:
+            self._cleanup_visual_attachment(screenshot_path)
 
     async def _evaluate_milestone_visual(
         self,
@@ -350,9 +385,15 @@ class ToolVerifier:
         visual_summary: str,
     ) -> VerificationResult:
         """Ask Flash LLM if milestone is visually complete."""
+        screenshot_path = ""
         try:
-            from providers.router import ModelRouter
-            router = _get_shared_router()
+            visual_summary, image_bytes, screenshot_path = self._visual_attachment(visual_summary)
+            router = self._router
+            if router is None:
+                return VerificationResult(
+                    success=True, confidence=0.5,
+                    message="Milestone visual checker unavailable — trusting completion claim"
+                )
 
             prompt = (
                 f"Milestone goal: '{milestone_goal}'\n"
@@ -361,19 +402,6 @@ class ToolVerifier:
                 f"Is this milestone complete based on what the screen shows? "
                 f"Reply with ONLY 'YES' or 'NO' followed by a single-sentence reason."
             )
-
-            import re
-            import os
-            image_bytes = None
-            match = re.search(r"Screenshot(?: captured)?: ([^\n]+)", visual_summary)
-            if match:
-                screenshot_path = match.group(1).strip()
-                if os.path.exists(screenshot_path):
-                    try:
-                        with open(screenshot_path, "rb") as f:
-                            image_bytes = f.read()
-                    except Exception as e:
-                        print(f"[Verifier] ⚠ Failed to read milestone screenshot: {e}")
 
             response = await router.route_and_call(
                 user_message=prompt,
@@ -393,8 +421,11 @@ class ToolVerifier:
                     message=f"Milestone visual check: {reason[:200]}",
                     should_retry=not confirmed,
                 )
-        except Exception as e:
-            print(f"[Verifier] ⚠ Milestone visual LLM call failed: {e}")
+        except Exception:
+            print("[Verifier] Milestone visual evaluation unavailable.")
+
+        finally:
+            self._cleanup_visual_attachment(screenshot_path)
 
         return VerificationResult(
             success=True, confidence=0.5,
@@ -544,18 +575,48 @@ class ToolVerifier:
     ) -> VerificationResult:
         """Verify that an app was quit."""
         target_app = args.get("app_name", "")
-        
-        if "quit" in result.lower() or "closed" in result.lower() or "success" in result.lower():
+        normalized = str(result or "").strip().lower()
+
+        # A failure such as "Could not quit ADELE" contains the word "quit".
+        # Check explicit failures first so a failed lifecycle action cannot be
+        # promoted to a completed milestone by its own error message.
+        failure_markers = (
+            "error",
+            "could not",
+            "failed",
+            "still running",
+            "access denied",
+            "timed out",
+        )
+        if not normalized or any(marker in normalized for marker in failure_markers):
+            return VerificationResult(
+                success=False,
+                confidence=0.98,
+                message=(str(result or "Quit verification returned no confirmation.")[:200]),
+                should_retry=True,
+                suggested_fix="Check whether the target application is still running before reporting completion.",
+            )
+
+        # The Windows tool emits these only after it has checked that the
+        # process is absent.  "Already closed" is also a verified idempotent
+        # result, not a guessed success.
+        if (
+            normalized.startswith("quit ")
+            or "is already closed" in normalized
+            or "closed successfully" in normalized
+        ):
             return VerificationResult(
                 success=True,
-                confidence=0.85,
-                message=f"{target_app} quit successfully"
+                confidence=0.95,
+                message=f"{target_app} is no longer running"
             )
-        
+
         return VerificationResult(
-            success=True,  # Quitting is usually successful even with vague results
-            confidence=0.7,
-            message=f"Quit command sent to {target_app}"
+            success=False,
+            confidence=0.8,
+            message=f"Quit result for {target_app} was not verifiable",
+            should_retry=True,
+            suggested_fix="Verify that the target process has exited before reporting completion.",
         )
 
     async def _verify_close_window(
@@ -988,6 +1049,21 @@ class ToolVerifier:
                 message=str(result)[:180],
                 should_retry=False,
             )
+        target_app = str(args.get("app_name") or "").strip().lower()
+        if target_app and get_state:
+            try:
+                state = await get_state()
+                active_app = str((state or {}).get("active_app") or "").lower()
+                if target_app not in active_app and active_app not in target_app:
+                    return VerificationResult(
+                        success=False,
+                        confidence=0.95,
+                        message=f"Target app '{target_app}' was not foreground before typing",
+                        should_retry=True,
+                        suggested_fix="Refocus the requested app before typing",
+                    )
+            except Exception:
+                pass
         # Typing is hard to verify without screenshots
         return VerificationResult(
             success=True,
@@ -1766,17 +1842,6 @@ class ToolVerifier:
 #  Shared Router for Visual Verification
 # ═══════════════════════════════════════════════════════════════
 
-_shared_router = None
-
-def _get_shared_router():
-    """Return a single ModelRouter instance shared across all visual verification calls."""
-    global _shared_router
-    if _shared_router is None:
-        from providers.router import ModelRouter
-        _shared_router = ModelRouter()
-    return _shared_router
-
-
 # ═══════════════════════════════════════════════════════════════
 #  Singleton Instance
 # ═══════════════════════════════════════════════════════════════
@@ -1785,9 +1850,11 @@ def _get_shared_router():
 _verifier: Optional[ToolVerifier] = None
 
 
-def get_verifier() -> ToolVerifier:
+def get_verifier(router=None) -> ToolVerifier:
     """Get the global ToolVerifier instance."""
     global _verifier
     if _verifier is None:
-        _verifier = ToolVerifier()
+        _verifier = ToolVerifier(router=router)
+    elif router is not None:
+        _verifier.set_router(router)
     return _verifier

@@ -5,6 +5,10 @@ const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const WebSocket = require("ws");
 const { autoUpdater } = require("electron-updater");
+const { AdeleIslandManager } = require("./island/island-manager");
+const { AdeleIslandNativeBridge } = require("./island/island-native-bridge");
+const { normalizePreferences: normalizeIslandPreferences } = require("./island/island-state");
+const { IslandSettingsAdapter } = require("./island/island-settings-adapter");
 const {
   app,
   BrowserWindow,
@@ -50,30 +54,34 @@ const SETTINGS_HOTKEYS = parseAcceleratorList(
   ["CommandOrControl+,"]
 );
 
-const WINDOW_LEVEL = "screen-saver";
+// A desktop companion must never outrank the user's applications.  The
+// screen-saver level can trap focus behind a transparent full-screen window.
+const WINDOW_LEVEL = "floating";
 const APP_USER_MODEL_ID = "com.startrz.adele";
-const DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview";
-const DEPRECATED_MODEL_ALIASES = new Map([
-  ["gemini-3.5-flash-live-preview", DEFAULT_GEMINI_MODEL],
-  ["models/gemini-3.5-flash-live-preview", DEFAULT_GEMINI_MODEL],
-  ["antigravity-preview-05-2026", DEFAULT_GEMINI_MODEL],
-  ["models/antigravity-preview-05-2026", DEFAULT_GEMINI_MODEL],
-]);
-
 function normalizeSavedCredentials(creds = {}) {
   if (!creds || typeof creds !== "object") return {};
-  const next = { ...creds };
-  for (const key of ["gemini_model", "gemini_live_model", "gemini_fast_model", "model"]) {
-    const value = String(next[key] || "").trim();
-    if (DEPRECATED_MODEL_ALIASES.has(value)) {
-      next[key] = DEPRECATED_MODEL_ALIASES.get(value);
-      next.model_migrated_from = value;
-    }
-  }
-  return next;
+  return { ...creds };
+}
+
+function normalizeAdeleIslandPreferences(preferences = {}) {
+  return normalizeIslandPreferences(preferences);
+}
+
+function getAdeleIslandPreferences(creds = {}) {
+  const preferences = normalizeAdeleIslandPreferences(creds?.adele_island || {});
+  if (process.env.ADELE_ISLAND_ENABLED === "1") preferences.enabled = true;
+  return preferences;
 }
 
 app.setName("ADELE");
+
+// A controlled override makes isolated package verification possible without
+// touching a person's normal Adele profile. It is intentionally read only at
+// startup and is not exposed to either renderer.
+const ADELE_USER_DATA_DIR = String(process.env.ADELE_USER_DATA_DIR || "").trim();
+if (ADELE_USER_DATA_DIR && path.isAbsolute(ADELE_USER_DATA_DIR)) {
+  app.setPath("userData", path.resolve(ADELE_USER_DATA_DIR));
+}
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -93,6 +101,11 @@ let lastWakeAt = 0;
 let pythonProcess = null;
 let ownsPythonProcess = false;
 let onboardingWindowMode = false;
+// Electron's `transparent` BrowserWindow option is immutable.  Keep track of
+// how this instance was created so that completing onboarding can replace its
+// opaque first-run window with a genuinely transparent overlay.
+let mainWindowIsTransparent = false;
+let mainWindowRecreatePending = false;
 let tray = null;
 let isQuitting = false;
 let hasShownStartupBalloon = false;
@@ -101,6 +114,9 @@ let pushToTalkListener = null;
 let pushToTalkPoller = null;
 let altHoldCount = 0;
 let pushToTalkActive = false;
+let islandManager = null;
+let islandNativeBridge = null;
+let islandSettingsAdapter = null;
 
 const ALT_KEY_NAMES = new Set(["LEFT ALT", "RIGHT ALT"]);
 let backendStartPromise = null;
@@ -113,10 +129,18 @@ if (!gotSingleInstanceLock) {
   process.exit(0);
 }
 
-const BACKEND_WS_URL = process.env.ADELE_BACKEND_WS_URL || "ws://127.0.0.1:8000/ws";
 const BACKEND_HOST = process.env.ADELE_BACKEND_HOST || "127.0.0.1";
 const BACKEND_PORT = Number(process.env.ADELE_BACKEND_PORT || "8000");
+const BACKEND_WS_URL = process.env.ADELE_BACKEND_WS_URL || `ws://${BACKEND_HOST}:${BACKEND_PORT}/ws`;
 const BRIDGE_PORT = Number(process.env.ADELE_BROWSER_BRIDGE_PORT || "8765");
+// A portable update can leave a previous backend process behind. Its health
+// alone is not enough to prove it belongs to this executable, so use an opaque
+// per-build owner marker before deciding it is safe to reuse.
+const BACKEND_OWNER_ID = crypto
+  .createHash("sha256")
+  .update(`${process.execPath}|${BACKEND_ROOT}`)
+  .digest("hex")
+  .slice(0, 16);
 const BACKEND_READY_SENTINEL = "[Backend] READY";
 const BUNDLED_PYTHON_VERSION = "3.12";
 
@@ -149,25 +173,21 @@ function getTrayIconImage() {
 
 // Bundled Picovoice key — enables the "Hey ADELE" wake word out of the box.
 // Users can replace this with their own key from console.picovoice.ai
-const BUNDLED_PICOVOICE_KEY = "lDvqq7J641WbqdzMsPCdLlawELhfGZOGhaceFzl3ZYYYzeeuXq55YA==";
+const BUNDLED_PICOVOICE_KEY = "";
 
 // ── Credential storage ──
 const CRED_FILE = path.join(app.getPath("userData"), "credentials.enc");
 
 /**
  * Check whether we have *usable* saved credentials (file exists,
- * decrypts successfully, and contains a Gemini API key).
- * Returns true only when the user can skip onboarding.
+ * decrypts successfully). ChatGPT credentials are owned by Codex rather than
+ * this encrypted file, so this is intentionally not an LLM-auth gate.
  */
 function hasUsableCredentials() {
   if (!fs.existsSync(CRED_FILE)) return false;
   const creds = loadCredentials();          // returns null on any failure
   if (!creds) return false;
-  if (creds.llm_provider === "ollama") return !!creds.local_model;
-  if (creds.llm_provider === "openai-compatible-local") {
-    return !!(creds.local_base_url && creds.local_model);
-  }
-  return !!creds.gemini_api_key;
+  return true;
 }
 
 function sleep(ms) {
@@ -229,7 +249,9 @@ async function canHandshakeBackend(timeoutMs = 4000) {
     ws.once("message", (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg?.type === "status") finish(true);
+        if (msg?.type === "status") {
+          finish(msg.backendOwnerId === BACKEND_OWNER_ID);
+        }
       } catch {
         finish(false);
       }
@@ -246,8 +268,9 @@ function freeBackendPort() {
   if (process.platform !== "win32") return false;
   const result = spawnSync("netstat", ["-ano"], { encoding: "utf8" });
   const pids = new Set();
+  const adelePorts = [BACKEND_PORT, BRIDGE_PORT];
   for (const line of (result.stdout || "").split("\n")) {
-    if (!line.includes(`:${BACKEND_PORT}`) || !line.includes("LISTENING")) continue;
+    if (!adelePorts.some((port) => line.includes(`:${port}`)) || !line.includes("LISTENING")) continue;
     const parts = line.trim().split(/\s+/);
     const pid = parts[parts.length - 1];
     if (pid && pid !== "0") pids.add(pid);
@@ -699,49 +722,15 @@ async function startPythonBackendInner() {
 
   console.log("[Backend] Starting Python server...");
 
-  // Load saved credentials and inject API keys into Python's environment
+  // Load only non-LLM preferences. ChatGPT credentials remain inside Codex.
   const savedCreds = loadCredentials();
   const spawnEnv = {
     ...process.env,
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8",
   };
-  if (savedCreds?.gemini_api_key) spawnEnv.GEMINI_API_KEY = savedCreds.gemini_api_key;
-  const mongoUri = (savedCreds?.mongodb_uri ?? "").trim();
-  const mongoDb = (savedCreds?.mongodb_db ?? "").trim();
-  if (mongoUri) {
-    spawnEnv.ADELE_MONGODB_URI = mongoUri;
-    spawnEnv.MONGODB_URI = mongoUri;
-  }
-  if (mongoDb) {
-    spawnEnv.ADELE_MONGODB_DB = mongoDb;
-    spawnEnv.MONGODB_DB = mongoDb;
-  }
-  const llmProvider = (savedCreds?.llm_provider ?? "gemini").trim();
-  spawnEnv.ADELE_LLM_PROVIDER = llmProvider;
-  const localModel = (savedCreds?.local_model ?? "").trim();
-  const localBaseUrl = (savedCreds?.local_base_url ?? "").trim();
-  const localApiKey = (savedCreds?.local_api_key ?? "").trim();
-  if (localModel) {
-    spawnEnv.ADELE_LOCAL_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_FAST_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_POWERFUL_MODEL = localModel;
-    spawnEnv.ADELE_LOCAL_ROUTING_MODEL = localModel;
-  }
-  if (localBaseUrl) spawnEnv.ADELE_LOCAL_BASE_URL = localBaseUrl;
-  if (localApiKey) spawnEnv.ADELE_LOCAL_API_KEY = localApiKey;
-  if (typeof savedCreds?.local_supports_tools !== "undefined") {
-    spawnEnv.ADELE_LOCAL_SUPPORTS_TOOLS = savedCreds.local_supports_tools ? "1" : "0";
-  }
-  if (typeof savedCreds?.local_supports_vision !== "undefined") {
-    spawnEnv.ADELE_LOCAL_SUPPORTS_VISION = savedCreds.local_supports_vision ? "1" : "0";
-  }
-  const geminiModel = (savedCreds?.gemini_model ?? DEFAULT_GEMINI_MODEL).trim();
-  if (geminiModel && llmProvider === "gemini") {
-    spawnEnv.GEMINI_FAST_MODEL = geminiModel;
-    spawnEnv.GEMINI_POWERFUL_MODEL = geminiModel;
-    spawnEnv.GEMINI_ROUTING_MODEL = geminiModel;
-  }
+  spawnEnv.ADELE_LLM_PROVIDER = "codex-app-server";
+  spawnEnv.ADELE_BACKEND_OWNER_ID = BACKEND_OWNER_ID;
   // Use saved Picovoice key if set, otherwise fall back to the bundled default
   spawnEnv.PICOVOICE_ACCESS_KEY = savedCreds?.picovoice_key || BUNDLED_PICOVOICE_KEY;
 
@@ -763,7 +752,6 @@ async function startPythonBackendInner() {
     console.error("[Backend] Could not create ADELE data dir:", adeleDataDir, err);
   }
   spawnEnv.ADELE_DATA_DIR = adeleDataDir;
-  syncMongoConfigFile(savedCreds);
   syncPreferencesFile(savedCreds);
 
   // Start the python process
@@ -955,6 +943,13 @@ function ensureOverlayVisible() {
     mainWindow.focus();
     return;
   }
+  if (!mainWindowIsTransparent) {
+    // This can only happen during the short transition out of onboarding.
+    // CSS cannot make an opaque BrowserWindow transparent, so replace it
+    // rather than leaving a full-screen black surface above the desktop.
+    recreateMainWindowAsOverlay();
+    return;
+  }
   setOverlayWindowMode();
   mainWindow.setSkipTaskbar(false);
   mainWindow.show();
@@ -1122,7 +1117,7 @@ function stopPushToTalk() {
   pushToTalkListener = null;
 }
 
-function createTray() {
+function createLegacyTrayMenu() {
   if (tray) return tray;
 
   tray = new Tray(getTrayIconImage());
@@ -1153,12 +1148,66 @@ function createTray() {
   return tray;
 }
 
+function openIslandHome(tab = "home") {
+  if (islandManager?.isEnabled()) return islandManager.openHome(tab);
+  return false;
+}
+
+function openIslandDiagnostics() {
+  const island = islandManager?.snapshot?.() || { mode: "sleeping", physicalState: "disabled" };
+  dialog.showMessageBox({
+    type: "info",
+    title: "ADELE diagnostics",
+    message: "ADELE desktop diagnostics",
+    detail: [
+      `Backend: ${lastBackendStartDetail || "starting"}`,
+      `Island: ${islandManager?.isEnabled() ? `${island.physicalState} / ${island.mode}` : "disabled"}`,
+      `Island bridge: ${islandNativeBridge?.available?.() ? "available" : "not available"}`,
+    ].join("\\n"),
+  }).catch?.(() => {});
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
+  const islandEnabled = Boolean(islandManager?.isEnabled());
+  const template = islandEnabled ? [
+    { label: "Open Adele", click: () => openIslandHome("home") },
+    { label: "Island Settings", click: () => openIslandHome("settings") },
+    { type: "separator" },
+    { label: "Restart Island", click: () => restartAdeleIsland() },
+    { label: "Restart Backend", click: async () => { stopPythonBackend(); await sleep(500); startPythonBackend(); } },
+    { label: "Open Diagnostics", click: () => openIslandDiagnostics() },
+    { type: "separator" },
+    { label: "Quit ADELE", click: () => { isQuitting = true; app.quit(); } },
+  ] : [
+    { label: "Open ADELE", click: () => wakeOverlay() },
+    { label: "Settings", click: () => openSettingsWindow() },
+    { type: "separator" },
+    { label: "Restart Backend", click: async () => { stopPythonBackend(); await sleep(500); startPythonBackend(); } },
+    { type: "separator" },
+    { label: "Quit ADELE", click: () => { isQuitting = true; app.quit(); } },
+  ];
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
+
+function createTray() {
+  if (!tray) {
+    tray = new Tray(getTrayIconImage());
+    tray.on("click", () => openIslandHome("home") || wakeOverlay());
+    tray.on("double-click", () => openIslandHome("home") || wakeOverlay());
+  }
+  updateTrayPresence("Starting…");
+  refreshTrayMenu();
+  return tray;
+}
+
 function createWindow() {
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
   const windowIcon = getAppIconImage();
   const firstLaunch = !hasUsableCredentials();
   onboardingWindowMode = firstLaunch;
+  mainWindowIsTransparent = !firstLaunch;
 
   mainWindow = new BrowserWindow({
     width: width,
@@ -1219,8 +1268,42 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
+function recreateMainWindowAsOverlay() {
+  if (mainWindowRecreatePending) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  // Do not strand a user in a blank opaque window if credential persistence
+  // failed. In that case onboarding remains the correct, usable surface.
+  if (!hasUsableCredentials()) {
+    onboardingWindowMode = true;
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+
+  mainWindowRecreatePending = true;
+  const previousWindow = mainWindow;
+  mainWindow = null;
+  onboardingWindowMode = false;
+  mainWindowIsTransparent = false;
+
+  try {
+    // The normal close handler hides a window. This is a deliberate renderer
+    // replacement, so remove it and dispose of the old opaque surface.
+    previousWindow.removeAllListeners("close");
+    if (!previousWindow.isDestroyed()) previousWindow.destroy();
+  } finally {
+    mainWindowRecreatePending = false;
+    createWindow();
+  }
+}
+
 function setOverlayWindowMode() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindowIsTransparent) {
+    recreateMainWindowAsOverlay();
+    return;
+  }
   onboardingWindowMode = false;
   mainWindow.setSkipTaskbar(false);
   mainWindow.setResizable(false);
@@ -1263,6 +1346,7 @@ function hideOverlay() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   setMousePassthrough(true);
   mainWindow.webContents.send("overlay-hidden");
+  mainWindow.hide();
 }
 
 function registerHotkey() {
@@ -1277,7 +1361,7 @@ function registerHotkey() {
     let ok = false;
     try {
       ok = globalShortcut.register(accelerator, () => {
-        wakeOverlay();
+        if (!openIslandHome("home")) wakeOverlay();
       });
     } catch (err) {
       console.error(`Failed to register global shortcut: ${accelerator}`, err);
@@ -1293,6 +1377,7 @@ function registerHotkey() {
     let ok = false;
     try {
       ok = globalShortcut.register(accelerator, () => {
+        if (openIslandHome("settings")) return;
         if (!mainWindow || mainWindow.isDestroyed()) return;
         mainWindow.show();
         mainWindow.focus();
@@ -1491,15 +1576,114 @@ function sendToRenderer(channel, ...args) {
   }
 }
 
+function showIslandApproval(approvalId = "") {
+  showMainWindow();
+  // The primary renderer already owns the approval modal and its approval ID.
+  // The island only surfaces a Review affordance; it never approves directly.
+  sendToRenderer("island:review-approval", String(approvalId || "").slice(0, 120));
+}
+
+function getIslandSettingsAdapter() {
+  if (islandSettingsAdapter) return islandSettingsAdapter;
+  islandSettingsAdapter = new IslandSettingsAdapter({
+    readCredentials: () => loadCredentials() || {},
+    writeCredentials: (credentials) => saveCredentials(credentials),
+    onChange: (preferences) => {
+      islandManager?.updatePreferences(preferences);
+      refreshTrayMenu();
+    },
+  });
+  return islandSettingsAdapter;
+}
+
+function openIslandAdvancedSettings(section = "") {
+  openSettingsWindow();
+  sendToRenderer("settings:open-island", String(section || "").slice(0, 80));
+}
+
+function configureAdeleIsland(creds = {}) {
+  const preferences = getAdeleIslandPreferences(creds);
+  if (!app.isReady()) return preferences;
+
+  if (!islandManager) {
+    islandManager = new AdeleIslandManager({
+      appRoot: __dirname,
+      screen,
+      preferences,
+      showMainWindow,
+      reviewApproval: showIslandApproval,
+      onBridgeCommand: async (type, payload) => islandNativeBridge?.send(type, payload) || false,
+      onSubmitCommand: (command) => {
+        showMainWindow();
+        sendToRenderer("island:submit-command", command);
+        return true;
+      },
+      onStartListening: () => {
+        wakeOverlay();
+        return true;
+      },
+      onStopListening: () => true,
+      openAdvancedSettings: openIslandAdvancedSettings,
+      logger: console,
+    });
+  }
+  islandManager.updatePreferences(preferences);
+
+  if (!islandManager.isEnabled()) {
+    islandNativeBridge?.stop();
+    islandNativeBridge = null;
+    refreshTrayMenu();
+    return preferences;
+  }
+
+  if (!islandNativeBridge) {
+    islandNativeBridge = new AdeleIslandNativeBridge({
+      appRoot: __dirname,
+      resourcesPath: process.resourcesPath,
+      packaged: IS_PACKAGED,
+      onEvent: (event) => islandManager?.publish(event),
+      logger: console,
+    });
+  }
+  // A missing optional sidecar is not an app failure. The core Adele island
+  // still mirrors Adele task state, while native media/notification features
+  // stay unavailable until a signed helper is supplied.
+  islandNativeBridge.start();
+  refreshTrayMenu();
+  return preferences;
+}
+
+function stopAdeleIsland() {
+  islandNativeBridge?.stop();
+  islandNativeBridge = null;
+  islandManager?.destroy();
+  islandManager = null;
+  refreshTrayMenu();
+}
+
+function restartAdeleIsland() {
+  const preferences = getAdeleIslandPreferences(loadCredentials() || {});
+  if (!preferences.enabled) return false;
+  islandNativeBridge?.stop();
+  islandNativeBridge = null;
+  islandManager?.restart();
+  configureAdeleIsland({ adele_island: preferences });
+  return Boolean(islandManager?.isEnabled());
+}
+
+function isIslandSender(event) {
+  return Boolean(islandManager?.window && event?.sender === islandManager.window.webContents);
+}
+
 app.whenReady().then(async () => {
   await configureMicrophonePermissions();
   Menu.setApplicationMenu(null);
   const startupCreds = loadCredentials();
-  syncMongoConfigFile(startupCreds);
   syncPreferencesFile(startupCreds);
 
   // Create window first so setup:progress events can reach the renderer
   createWindow();
+  configureAdeleIsland(startupCreds);
   createTray();
   registerHotkey();
   initPushToTalk();
@@ -1507,13 +1691,10 @@ app.whenReady().then(async () => {
   // Initialise auto-updater (checks GitHub Releases in the background)
   initAutoUpdater();
 
-  // Returning user (credentials valid): start backend immediately with saved API keys.
-  // First launch / corrupt credentials: renderer shows onboarding first.
-  if (hasUsableCredentials()) {
-    // Brief pause for window to finish loading before setup:progress events fire
-    await new Promise(r => setTimeout(r, 800));
-    startPythonBackend();
-  }
+  // Start for every user. Codex owns the ChatGPT session, so no API key is
+  // required before the local backend can present the sign-in experience.
+  await new Promise(r => setTimeout(r, 800));
+  startPythonBackend();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -1528,12 +1709,102 @@ app.whenReady().then(async () => {
 });
 
 app.on("second-instance", () => {
-  showMainWindow();
+  if (!openIslandHome("home")) showMainWindow();
 });
 
 ipcMain.on("presence:update", (_event, payload = {}) => {
   const detail = String(payload.detail || payload.state || "ADELE").trim();
   updateTrayPresence(detail);
+});
+
+ipcMain.on("island:renderer-event", (_event, payload = {}) => {
+  // The main renderer may only mirror a normalized, low-detail state event.
+  // Validation happens again inside IslandEventBroker/AdeleIslandState.
+  islandManager?.publish(payload);
+});
+
+ipcMain.on("island:pointer-inside", (event, active) => {
+  if (!isIslandSender(event) || typeof active !== "boolean") return;
+  islandManager?.setPointerInside(active);
+});
+
+ipcMain.on("island:internal-interaction", (event, active) => {
+  if (!isIslandSender(event) || typeof active !== "boolean") return;
+  islandManager?.setInternalInteraction(active);
+});
+
+ipcMain.handle("island:action", async (event, action, payload = {}) => {
+  if (!isIslandSender(event) || typeof action !== "string" || !payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  return islandManager?.handleAction(action, payload) || false;
+});
+
+ipcMain.handle("island:get-state", (event) => {
+  if (!isIslandSender(event)) return null;
+  return islandManager?.snapshot() || null;
+});
+
+ipcMain.handle("island:get-settings", (event) => {
+  if (!isIslandSender(event)) return null;
+  return getIslandSettingsAdapter().read();
+});
+
+ipcMain.handle("island:update-setting", (event, key, value) => {
+  if (!isIslandSender(event) || typeof key !== "string") return { ok: false };
+  return getIslandSettingsAdapter().update(key, value);
+});
+
+ipcMain.handle("island:open-home", (event, tab = "home") => {
+  if (!isIslandSender(event) || typeof tab !== "string") return false;
+  return islandManager?.openHome(tab) || false;
+});
+
+ipcMain.handle("island:close-home", (event) => {
+  if (!isIslandSender(event)) return false;
+  return islandManager?.closeHome() || false;
+});
+
+ipcMain.handle("island:submit-command", (event, text = "") => {
+  if (!isIslandSender(event) || typeof text !== "string") return false;
+  return islandManager?.submitCommand(text) || false;
+});
+
+ipcMain.handle("island:start-listening", (event) => {
+  if (!isIslandSender(event)) return false;
+  return islandManager?.startListening() || false;
+});
+
+ipcMain.handle("island:stop-listening", (event) => {
+  if (!isIslandSender(event)) return false;
+  return islandManager?.stopListening() || false;
+});
+
+ipcMain.handle("island:restart", (event) => {
+  if (!isIslandSender(event)) return false;
+  return restartAdeleIsland();
+});
+
+ipcMain.handle("island:apply-preferences", (event, preferences = {}) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || !preferences || typeof preferences !== "object" || Array.isArray(preferences)) return false;
+  configureAdeleIsland({ adele_island: preferences });
+  return true;
+});
+
+ipcMain.handle("island:preview", async (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+  if (!islandManager) configureAdeleIsland({});
+  if (!islandManager) return false;
+  const savedPreferences = islandManager.preferences;
+  islandManager.updatePreferences({ ...savedPreferences, enabled: true });
+  try {
+    return await islandManager.preview();
+  } finally {
+    islandManager.updatePreferences(savedPreferences);
+  }
+});
+
+ipcMain.handle("backend:get-ws-url", (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return "";
+  return BACKEND_WS_URL;
 });
 
 ipcMain.handle("overlay:hide", () => {
@@ -1564,8 +1835,18 @@ ipcMain.handle("window:set-onboarding-mode", (event, active) => {
   if (active) {
     setNormalWindowMode();
   } else {
-    setOverlayWindowMode();
-    ensureOverlayVisible();
+    // Let the IPC response settle before destroying the renderer that issued
+    // it. The replacement window will boot from the persisted onboarding
+    // state as a transparent overlay.
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!mainWindowIsTransparent) {
+        recreateMainWindowAsOverlay();
+      } else {
+        setOverlayWindowMode();
+        ensureOverlayVisible();
+      }
+    }, 0);
   }
   return true;
 });
@@ -1631,8 +1912,8 @@ function saveCredentials(creds) {
     }
     const encrypted = safeStorage.encryptString(JSON.stringify(normalizeSavedCredentials(creds)));
     fs.writeFileSync(CRED_FILE, encrypted);
-    syncMongoConfigFile(creds);
     syncPreferencesFile(creds);
+    configureAdeleIsland(creds);
     return true;
   } catch (err) {
     console.error("[Auth] Failed to save credentials:", err.message);
@@ -1651,32 +1932,11 @@ function syncPreferencesFile(creds) {
       memory_no_screenshots: creds?.memory_no_screenshots !== false,
       memory_summaries_only: creds?.memory_summaries_only !== false,
       memory_disable_sensitive_apps: creds?.memory_disable_sensitive_apps !== false,
+      adele_island: normalizeAdeleIslandPreferences(creds?.adele_island || {}),
     };
     fs.writeFileSync(configPath, JSON.stringify(prefs, null, 2), "utf8");
   } catch (err) {
     console.error("[Auth] Failed to sync preferences file:", err.message);
-  }
-}
-
-/** Plain-text Mongo config for the Python backend (credentials.enc is Electron-only). */
-function syncMongoConfigFile(creds) {
-  const adeleDataDir = path.join(app.getPath("userData"), "adele-data");
-  const configPath = path.join(adeleDataDir, "mongodb.json");
-  try {
-    fs.mkdirSync(adeleDataDir, { recursive: true });
-    const mongoUri = (creds?.mongodb_uri ?? "").trim();
-    const mongoDb = (creds?.mongodb_db ?? "adele").trim() || "adele";
-    if (mongoUri) {
-      fs.writeFileSync(
-        configPath,
-        JSON.stringify({ mongodb_uri: mongoUri, mongodb_db: mongoDb }, null, 2),
-        "utf8"
-      );
-    } else if (fs.existsSync(configPath)) {
-      fs.unlinkSync(configPath);
-    }
-  } catch (err) {
-    console.error("[Auth] Failed to sync MongoDB config file:", err.message);
   }
 }
 
@@ -1830,6 +2090,29 @@ ipcMain.handle("app:open-external", async (_event, rawUrl) => {
   }
 });
 
+function isAllowedCodexAuthUrl(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl || ""));
+    const hostname = url.hostname.toLowerCase();
+    const allowed = hostname === "chatgpt.com" || hostname.endsWith(".chatgpt.com")
+      || hostname === "openai.com" || hostname.endsWith(".openai.com");
+    return url.protocol === "https:" && allowed && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle("auth:open-codex-url", async (_event, rawUrl) => {
+  if (!isAllowedCodexAuthUrl(rawUrl)) return false;
+  try {
+    await shell.openExternal(String(rawUrl));
+    return true;
+  } catch {
+    // Do not interpolate an auth URL or the underlying Electron error.
+    return false;
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 //  Auto-Updater IPC handlers
 // ═══════════════════════════════════════════════════════════════
@@ -1859,5 +2142,6 @@ ipcMain.handle("updater:install", () => {
 app.on("will-quit", () => {
   stopPushToTalk();
   globalShortcut.unregisterAll();
+  stopAdeleIsland();
   stopPythonBackend();
 });

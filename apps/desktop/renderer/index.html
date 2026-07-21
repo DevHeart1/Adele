@@ -299,7 +299,6 @@
           <span class="onboarding-progress-dot" data-onboarding-progress="1"></span>
           <span class="onboarding-progress-dot" data-onboarding-progress="2"></span>
           <span class="onboarding-progress-dot" data-onboarding-progress="3"></span>
-          <span class="onboarding-progress-dot" data-onboarding-progress="4"></span>
         </div>
 
         <!-- Step 1: Welcome -->
@@ -313,18 +312,18 @@
             </div>
             <h3 class="onboarding-welcome-title">Welcome to ADELE</h3>
             <p class="onboarding-welcome-meaning">Your memory-aware desktop companion.</p>
-            <button type="button" class="onboarding-welcome-primary" id="onboarding-start">Get Started</button>
+            <button type="button" class="onboarding-welcome-primary" id="onboarding-start">Start with ChatGPT</button>
             <p class="onboarding-welcome-terms">By clicking the button, you agree to our <a href="#" class="onboarding-inline-link">Terms of Use</a>.</p>
           </div>
         </div>
 
-        <!-- Step 1: API Key -->
+        <!-- Step 1: ChatGPT sign-in -->
         <div class="onboarding-step" id="onboarding-step-1">
-          <div class="onboarding-step-kicker">Step 1 of 5</div>
-          <h3 class="onboarding-step-title">Enter Google (Gemini) API Key</h3>
+          <div class="onboarding-step-kicker">Step 1 of 4</div>
+          <h3 class="onboarding-step-title">Meet Adele</h3>
           <div class="onboarding-body">
-            <p class="onboarding-intro">Get your key free at Google AI Studio — no credit card needed.</p>
-            <div class="onboarding-apikey-box">
+            <p class="onboarding-intro">Your AI agent for getting work done across your desktop. Adele asks before sensitive actions and verifies completed work.</p>
+            <div class="onboarding-apikey-box hidden">
               <a href="https://aistudio.google.com/app/apikey" id="onboarding-open-aistudio" class="onboarding-link">Get free key at aistudio.google.com →</a>
               <div class="onboarding-input-row">
                 <span class="onboarding-input-prefix" aria-hidden="true">
@@ -339,19 +338,25 @@
               </div>
             </div>
           </div>
-          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-next-0">
-            <span class="onboarding-btn-label">Continue</span>
+          <p id="onboarding-chatgpt-status" class="onboarding-field-status" role="status" aria-live="polite">Checking Codex connection...</p>
+          <p id="onboarding-chatgpt-account" class="onboarding-step-intro"></p>
+          <p id="onboarding-device-code" class="onboarding-step-intro hidden"></p>
+          <button type="button" class="onboarding-btn onboarding-btn-gradient" id="onboarding-chatgpt-connect">
+            <span class="onboarding-btn-label">Start with ChatGPT</span>
             <svg class="onboarding-btn-chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
           </button>
+          <button type="button" class="onboarding-btn secondary hidden" id="onboarding-chatgpt-device">Use device code instead</button>
+          <button type="button" class="onboarding-btn secondary hidden" id="onboarding-chatgpt-cancel">Cancel</button>
         </div>
 
-        <!-- Step 3: Connect MongoDB Memory -->
+        <!-- Step 2: Local memory files -->
         <div class="onboarding-step" id="onboarding-step-2">
           <div class="onboarding-step-kicker">Step 2 of 5</div>
-          <h3 class="onboarding-step-title">Connect MongoDB Memory</h3>
+          <h3 class="onboarding-step-title">Local memory files</h3>
           <div class="onboarding-body">
-            <p class="onboarding-step-intro">ADELE stores context, conversation history, and long-term memory in a MongoDB database.</p>
-            <div class="onboarding-apikey-box" style="display: flex; flex-direction: column; gap: 12px; width: 100%;">
+            <p class="onboarding-step-intro">ADELE saves conversation context and approved long-term memories as local files on this device. No database account or connection is needed.</p>
+            <p class="settings-hint">Memory files are kept in Adele's data directory and can be backed up or deleted by you at any time.</p>
+            <div class="onboarding-apikey-box" style="display: none;">
               <div class="onboarding-input-row onboarding-input-row-secondary">
                 <span class="onboarding-input-prefix" aria-hidden="true">
                   <svg class="onboarding-row-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
@@ -411,7 +416,7 @@ nslookup your-cluster.mongodb.net</pre>
 
         <!-- Step 4: ElevenLabs Key -->
         <div class="onboarding-step" id="onboarding-step-3">
-          <div class="onboarding-step-kicker">Step 3 of 5</div>
+          <div class="onboarding-step-kicker">Step 2 of 4</div>
           <h3 class="onboarding-step-title">Voice replies</h3>
           <div class="onboarding-body">
             <p class="onboarding-step-intro">Connect ElevenLabs so ADELE can speak back with the voice you choose next.</p>
@@ -443,7 +448,7 @@ nslookup your-cluster.mongodb.net</pre>
 
         <!-- Step 5: Voice Selection -->
         <div class="onboarding-step" id="onboarding-step-voice-select">
-          <div class="onboarding-step-kicker">Step 4 of 5</div>
+          <div class="onboarding-step-kicker">Step 3 of 4</div>
           <h3 class="onboarding-step-title">Choose a voice</h3>
           <div class="onboarding-body">
             <p class="onboarding-step-intro">Pick the ElevenLabs voice ADELE should use for spoken replies.</p>
@@ -460,7 +465,7 @@ nslookup your-cluster.mongodb.net</pre>
 
         <!-- Step 6: Setup Checklist -->
         <div class="onboarding-step" id="onboarding-step-4">
-          <div class="onboarding-step-kicker">Step 5 of 5</div>
+          <div class="onboarding-step-kicker">Step 4 of 4</div>
           <h3 class="onboarding-step-title">Preparing ADELE</h3>
           <div class="onboarding-body">
             <p class="onboarding-step-intro">Setting up ADELE — takes about 60 seconds the first time while Python dependencies install.</p>
@@ -481,9 +486,9 @@ nslookup your-cluster.mongodb.net</pre>
                 <span class="check-icon" aria-hidden="true">⏳</span>
                 <span class="check-label">Microphone access</span>
               </div>
-              <div class="check-item" id="check-mongodb">
+              <div class="check-item" id="check-local-memory">
                 <span class="check-icon" aria-hidden="true">⏳</span>
-                <span class="check-label">MongoDB memory</span>
+                <span class="check-label">Local memory files</span>
               </div>
             </div>
             <div class="onboarding-log-panel" id="onboarding-log-panel">
@@ -651,7 +656,7 @@ nslookup your-cluster.mongodb.net</pre>
             </div>
             <div class="settings-app-info-row">
               <span class="settings-app-info-label">Provider</span>
-              <span class="settings-app-info-value">Gemini API (cloud)</span>
+              <span class="settings-app-info-value">ChatGPT via Codex</span>
             </div>
             <div class="settings-app-info-row settings-app-info-row-path">
               <span class="settings-app-info-label">Data directory</span>
@@ -659,19 +664,18 @@ nslookup your-cluster.mongodb.net</pre>
             </div>
           </div>
           <section class="settings-section">
-            <p class="settings-section-kicker">Gemini</p>
-            <p class="settings-hint">Gemini is ADELE's reasoning layer. It understands your request, screen context, and tools with adaptive thinking depth. Get your key free at <a href="https://aistudio.google.com/app/apikey" id="settings-link-aistudio" class="onboarding-inline-link">Google AI Studio</a>.</p>
-            <label class="settings-label" for="settings-gemini-key">Gemini API key</label>
-            <input type="password" id="settings-gemini-key" class="onboarding-input" autocomplete="off" spellcheck="false" />
+            <p class="settings-section-kicker">AI connection</p>
+            <p class="settings-hint">Connected with ChatGPT. GPT-5.6 is Adele's required Build Week model. Adele never stores your ChatGPT password or tokens.</p>
             <div class="settings-connection-row">
               <span id="settings-gemini-status-pill" class="settings-status-pill" data-state="idle">Not connected</span>
-              <button type="button" class="onboarding-btn secondary" id="settings-gemini-test">Test Connection</button>
+              <button type="button" class="onboarding-btn secondary" id="settings-codex-check">Check connection</button>
+              <button type="button" class="onboarding-btn secondary" id="settings-codex-logout">Sign out</button>
             </div>
             <p class="onboarding-field-status" id="settings-gemini-status" role="status" aria-live="polite"></p>
-            <p class="settings-hint subtle">Model: <strong>gemini-3-flash-preview</strong> (fixed)</p>
+            <p class="settings-hint subtle">Model: <strong>GPT-5.6</strong> (required)</p>
           </section>
 
-          <section class="settings-section">
+          <section class="settings-section" hidden>
             <p class="settings-section-kicker">MongoDB memory</p>
             <p class="settings-hint">Memory is what makes ADELE personal. ADELE saves useful summaries, workflows, mistakes, and project context only under the rules you choose.</p>
             <label class="settings-label" for="settings-mongodb-uri">Connection URI</label>
@@ -718,7 +722,7 @@ nslookup your-cluster.mongodb.net</pre>
 
           <section class="settings-section">
             <p class="settings-section-kicker">Voice replies</p>
-            <p class="settings-hint">Optional premium voice output via ElevenLabs. Gemini handles reasoning; ElevenLabs adds Scribe transcription and a custom spoken voice. Get an API key at <a href="https://elevenlabs.io/app/settings/api-keys" id="settings-link-eleven" class="onboarding-inline-link">elevenlabs.io</a>.</p>
+            <p class="settings-hint">Optional premium voice output via ElevenLabs. ChatGPT handles reasoning; ElevenLabs adds Scribe transcription and a custom spoken voice. Get an API key at <a href="https://elevenlabs.io/app/settings/api-keys" id="settings-link-eleven" class="onboarding-inline-link">elevenlabs.io</a>.</p>
             <label class="settings-label" for="settings-elevenlabs-key">ElevenLabs API key</label>
             <input type="password" id="settings-elevenlabs-key" class="onboarding-input onboarding-input-secondary" autocomplete="off" spellcheck="false" />
             <p class="onboarding-field-status" id="settings-elevenlabs-status" role="status" aria-live="polite"></p>
@@ -770,6 +774,30 @@ nslookup your-cluster.mongodb.net</pre>
               <input type="checkbox" id="settings-rule-sensitive" checked />
               <span>Disable memory for sensitive apps (password managers, banking)</span>
             </label>
+          </section>
+
+          <section class="settings-section" id="settings-island-section">
+            <p class="settings-section-kicker">Adele Island <span class="settings-hint subtle">Windows only</span></p>
+            <p class="settings-hint">An optional, click-through status pill at the top of the screen. It never replaces the ADELE window and is off by default.</p>
+            <label class="settings-checkbox-row">
+              <input type="checkbox" id="settings-island-enabled" />
+              <span>Enable Adele Island</span>
+            </label>
+            <div id="settings-island-options" class="settings-permissions-group hidden">
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-media" checked /><span>Show media controls</span></label>
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-notifications" /><span>Show Windows notifications</span></label>
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-hide-body" /><span>Hide notification content</span></label>
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-microphone" checked /><span>Show microphone indicator</span></label>
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-camera" checked /><span>Show camera indicator</span></label>
+              <label class="settings-checkbox-row"><input type="checkbox" id="settings-island-fullscreen" checked /><span>Hide during fullscreen</span></label>
+              <label class="settings-label" for="settings-island-monitor">Display</label>
+              <select id="settings-island-monitor" class="onboarding-input onboarding-input-secondary onboarding-select">
+                <option value="primary">Primary display</option>
+                <option value="cursor">Display with pointer</option>
+              </select>
+              <button type="button" class="onboarding-btn secondary" id="settings-island-preview">Test island</button>
+              <p class="settings-hint subtle">Media and notifications require the optional Windows helper. Test island uses local sample data only.</p>
+            </div>
           </section>
 
           <section class="settings-section">
