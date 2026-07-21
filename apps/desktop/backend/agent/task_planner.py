@@ -4,7 +4,9 @@ ADELE — Task Planner V2
 Milestone-first task planner for the unified execution loop.
 """
 
+import asyncio
 import json
+import re
 import time
 from typing import Optional, List
 from functools import partial
@@ -12,10 +14,11 @@ from functools import partial
 print = partial(print, flush=True)
 
 from agent.world_state import WorldState, UserIntent, IntentAction, TargetType, IntentParser, TaskGraph
+from agent.browser_intent_utils import is_browser_tab_query
 from agent.planner import Milestone, MilestonePlan, MilestoneStatus
 from agent.example_bank import ExampleBank
 from agent.template_registry import TemplateRegistry
-from tools.selector import get_tool_selector
+from tools.selector import get_tool_selector, is_time_sensitive_information_request
 
 
 def _norm_text(text: str) -> str:
@@ -41,6 +44,9 @@ with a success signal. The runtime executor decides which tools to call.
 4. hint_tools are SUGGESTIONS, not prescriptions. The executor may use different tools.
 5. Do not include max_actions. Runtime safety limits are enforced by the executor.
 6. deliverable_key names the output stored in working memory for downstream milestones.
+7. For time-sensitive factual requests (current results, team rosters, prices,
+   schedules, or news), include `get_web_information` and require sourced data
+   before the final response. Do not rely on static model knowledge.
 
 ## Voice Transcription Awareness
 Requests arrive as voice-transcribed text. Correct obvious errors."""
@@ -55,6 +61,9 @@ MILESTONE_PLANNING_PROMPT = """Given this user request and context, create a mil
 
 ## Conversation History
 {conversation_context}
+
+## Relevant Saved Context
+{supplemental_context}
 
 ## Active Skill Overlays
 {skill_context}
@@ -259,6 +268,9 @@ class TaskPlanner:
         self.intent_parser = IntentParser()
         self.example_bank = ExampleBank()
         self.template_registry = TemplateRegistry()
+        # This intentionally contains a short diagnostic code only. Never
+        # store model output, prompts, paths, screenshots, or exception text.
+        self.last_failure: Optional[str] = None
         
         # Cache for tool descriptions
         self._tool_descriptions_cache: Optional[str] = None
@@ -432,6 +444,219 @@ class TaskPlanner:
             source="milestone_media_shortcut",
         )
 
+    def build_direct_action_plan(
+        self,
+        user_request: str,
+        world_state: WorldState,
+        available_tools: Optional[List[str]] = None,
+    ) -> Optional[MilestonePlan]:
+        """Return a deterministic one-action plan when no milestone reasoning is needed.
+
+        This deliberately covers only explicit, reversible or read-only actions
+        with one known tool. Ambiguous, compound, or sensitive work stays on
+        the normal milestone and approval path.
+        """
+        intent = world_state.intent or self.intent_parser.parse(user_request, world_state)
+        task_graph = world_state.task_graph
+        allowed_tools = set(available_tools or [])
+        if intent.ambiguous or self._hard_safety_clarification_prompt(intent):
+            return None
+
+        # Browser-state questions are read-only and bounded. They must not fall
+        # through to the generic milestone planner, which can confuse the word
+        # "Chrome" with an instruction to open the application.
+        if is_browser_tab_query(user_request) and "browser_list_tabs" in allowed_tools:
+            print("[Planner] Route: browser_tab_query -> browser_list_tabs")
+            return MilestonePlan(
+                task_summary="Count the currently open browser tabs",
+                milestones=[
+                    Milestone(
+                        id=1,
+                        goal="Read the current browser tab count without changing Chrome",
+                        success_signal="A live tab count is returned, or the missing browser bridge is explained",
+                        hint_tools=["browser_list_tabs"],
+                        deliverable_key="browser_tab_count",
+                        direct_tool="browser_list_tabs",
+                        direct_tool_args={"summary_only": True},
+                    )
+                ],
+                final_response="",
+                source="milestone_browser_tab_query",
+            )
+
+        # A current factual question is a bounded, read-only lookup.  It needs
+        # a fresh source, but it should not pay the latency or UI cost of a
+        # high-effort milestone plan.  Core V2 turns this gateway result into
+        # the concise final response using the active ChatGPT provider.
+        if (
+            is_time_sensitive_information_request(user_request)
+            and "get_web_information" in allowed_tools
+        ):
+            return MilestonePlan(
+                task_summary="Look up current, source-backed information",
+                milestones=[
+                    Milestone(
+                        id=1,
+                        goal="Retrieve current information from a reliable web source",
+                        success_signal="Current source data is retrieved and ready to summarize",
+                        hint_tools=["get_web_information"],
+                        deliverable_key="current_information",
+                        direct_tool="get_web_information",
+                        direct_tool_args={
+                            "query": user_request,
+                            "target_type": "page_summary",
+                            "max_items": 5,
+                            "max_chars": 6000,
+                        },
+                    )
+                ],
+                final_response="",
+                source="milestone_current_information",
+            )
+
+        # Typing explicit text into the already focused field is a single,
+        # bounded desktop action.  Route it directly instead of asking the
+        # general planner to infer a multi-step task.  The resulting plan is
+        # still approval-gated because type_text is a UI-mutating tool.
+        direct_text = self._extract_explicit_text_entry(user_request)
+        if direct_text and "type_text" in allowed_tools:
+            target_app = (world_state.active_app or "").strip()
+            destination = f" in {target_app}" if target_app else ""
+            return MilestonePlan(
+                task_summary=f"Type the supplied text into the active input{destination}",
+                milestones=[
+                    Milestone(
+                        id=1,
+                        goal=f"Type this exact text into the focused input{destination}: {direct_text}",
+                        success_signal=(
+                            "The supplied text is entered in the currently focused input"
+                            f"{destination}"
+                        ),
+                        hint_tools=["type_text"],
+                        deliverable_key="typed_text",
+                        direct_tool="type_text",
+                        direct_tool_args={
+                            "text": direct_text,
+                            "app_name": target_app,
+                        },
+                    )
+                ],
+                final_response="Typed the requested text into the focused input.",
+                source="milestone_direct_text_entry",
+            )
+
+        if self._should_bypass_template_shortcuts(user_request, task_graph):
+            return None
+
+        if "read_screen" in allowed_tools and self._is_direct_visual_observation(user_request):
+            return MilestonePlan(
+                task_summary="Describe the visible screen",
+                milestones=[
+                    Milestone(
+                        id=1,
+                        goal="Describe the visible screen",
+                        success_signal="A concise, evidence-based screen description is returned",
+                        hint_tools=["read_screen"],
+                        deliverable_key="screen_description",
+                    )
+                ],
+                source="milestone_direct_screen",
+            )
+
+        media_shortcut = self._build_media_open_shortcut(
+            user_request,
+            intent,
+            available_tools,
+        )
+        if media_shortcut is not None:
+            return media_shortcut
+
+        required_tool = ""
+        if intent.action == IntentAction.OPEN and intent.target_type == TargetType.APP and intent.target_value:
+            required_tool = "open_app"
+        elif intent.action == IntentAction.OPEN and intent.target_type == TargetType.URL:
+            required_tool = "open_url"
+        elif intent.action == IntentAction.ANALYZE and intent.target_type == TargetType.FILE and intent.target_value:
+            required_tool = "read_file"
+
+        if not required_tool or required_tool not in allowed_tools:
+            return None
+
+        plan = self._build_sync_milestone_fallback(
+            user_request,
+            world_state,
+            intent,
+            task_graph,
+        )
+        if plan.needs_clarification or any(
+            tool not in allowed_tools
+            for milestone in plan.milestones
+            for tool in milestone.hint_tools
+        ):
+            return None
+        plan.source = "milestone_direct_action"
+        return plan
+
+    @staticmethod
+    def _extract_explicit_text_entry(user_request: str) -> str:
+        """Return literal text from a safe, single-field typing request.
+
+        Examples: ``type \"Hello\"`` and ``paste: Hello``.  Relative requests
+        such as "type it" deliberately stay on the regular planning path: the
+        text to write must be visible in the approval card before Adele can
+        modify the user's screen.
+        """
+        raw = (user_request or "").strip()
+        if not raw:
+            return ""
+
+        destination = (
+            r"(?:\s+(?:into|in|to)\s+(?:the|my|this)?\s*"
+            r"(?:active|focused|current)?\s*(?:field|input|text box|document|google docs?))?"
+        )
+        quoted = re.fullmatch(
+            r"(?:please\s+)?(?:type|paste|enter|insert)\s+"
+            r"(?:the\s+following(?:\s+text)?\s*)?[\"\u201c](.+?)[\"\u201d]" + destination + r"[.!?]?",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        colon = re.fullmatch(
+            r"(?:please\s+)?(?:type|paste|enter|insert)\s*[:\-]\s*(.+?)\s*",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        plain = re.fullmatch(
+            r"(?:please\s+)?(?:type|paste|enter|insert)\s+(.+?)" + destination + r"[.!?]?",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        match = quoted or colon or plain
+        if not match:
+            return ""
+
+        text = match.group(1).strip()
+        if not text or len(text) > 6000:
+            return ""
+        if text.lower() in {"it", "this", "that", "the above", "the story", "the draft"}:
+            return ""
+        return text
+
+    @staticmethod
+    def _is_direct_visual_observation(user_request: str) -> bool:
+        """Recognize simple read-only screen questions that need no plan."""
+        text = _norm_text(user_request)
+        direct_requests = (
+            "what is on my screen",
+            "what's on my screen",
+            "what do you see",
+            "describe the screen",
+            "read the screen",
+            "look at my screen",
+            "what is visible",
+            "what's visible",
+        )
+        return any(marker in text for marker in direct_requests)
+
     def _looks_like_repeat_message_request(
         self,
         user_request: str,
@@ -573,6 +798,8 @@ class TaskPlanner:
         available_tools: Optional[List[str]] = None,
         skill_context: str = "",
         skill_names: Optional[List[str]] = None,
+        supplemental_context: str = "",
+        thinking_level: str = "HIGH",
     ) -> Optional[MilestonePlan]:
         """
         Generate a milestone-based plan for a request.
@@ -581,6 +808,7 @@ class TaskPlanner:
         return usable plan JSON. Callers can then apply a deterministic
         milestone fallback or request clarification.
         """
+        self.last_failure = None
         intent = world_state.intent or self.intent_parser.parse(user_request, world_state)
         repeat_message_shortcut = self._build_repeat_message_shortcut(user_request, intent, world_state, available_tools)
         if repeat_message_shortcut is not None:
@@ -634,6 +862,7 @@ class TaskPlanner:
             world_state=world_state.to_prompt_string(),
             user_request=user_request,
             conversation_context=conversation_context,
+            supplemental_context=supplemental_context or "(none)",
             skill_context=skill_context or "(none)",
         )
 
@@ -654,21 +883,53 @@ class TaskPlanner:
                 print(f"[Planner] ⚠ ADK planning unavailable: {exc}")
 
         try:
-            from providers.gemini import MILESTONE_PLAN_JSON_SCHEMA
-
             response = await self._generate_with_compat(
                 messages=[{"role": "user", "parts": [{"text": prompt}]}],
                 system_prompt=MILESTONE_PLANNING_SYSTEM,
                 tools=[],
                 temperature=0.15,
-                thinking_level="HIGH",
-                response_json_schema=MILESTONE_PLAN_JSON_SCHEMA,
+                thinking_level=thinking_level,
                 enable_builtin_tools=False,
             )
-            if not response or not response.text:
+            if not response:
+                self._record_planner_failure("no_response")
+                return None
+            if getattr(response, "error", None):
+                self._record_planner_failure("provider_error")
+                return None
+            if not response.text:
+                self._record_planner_failure("empty_response")
                 return None
 
-            plan = self._parse_milestone_response(response.text, user_request)
+            try:
+                plan = self._parse_milestone_response(response.text, user_request)
+            except (ValueError, TypeError, json.JSONDecodeError):
+                # GPT-5.6 uses prompt-constrained JSON here.  Retry only an
+                # invalid response, rather than immediately falling back.
+                repair_prompt = (
+                    f"{prompt}\n\n"
+                    "Your previous reply was not a valid ADELE milestone plan. "
+                    "Return ONLY one valid JSON object in the exact Output Format "
+                    "above. Do not include markdown, explanations, tool calls, "
+                    "or any text before or after the JSON."
+                )
+                retry = await self._generate_with_compat(
+                    messages=[{"role": "user", "parts": [{"text": repair_prompt}]}],
+                    system_prompt=MILESTONE_PLANNING_SYSTEM,
+                    tools=[],
+                    temperature=0.0,
+                    thinking_level=thinking_level,
+                    enable_builtin_tools=False,
+                )
+                if not retry or getattr(retry, "error", None) or not retry.text:
+                    self._record_planner_failure("plan_repair_unavailable")
+                    return None
+                try:
+                    plan = self._parse_milestone_response(retry.text, user_request)
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    self._record_planner_failure("malformed_plan_json")
+                    return None
+
             plan.skill_context = skill_context or ""
             plan.skills_used = list(skill_names or [])
             elapsed = time.time() - t_start
@@ -676,9 +937,16 @@ class TaskPlanner:
                   f"{len(plan.milestones)} milestones)")
             return plan
 
-        except Exception as e:
-            print(f"[Planner] ⚠ Milestone planning failed: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._record_planner_failure("planner_exception")
             return None
+
+    def _record_planner_failure(self, code: str) -> None:
+        """Record a safe planner diagnostic without user or system data."""
+        self.last_failure = code
+        print(f"[Planner] Milestone planning unavailable ({code}).")
 
     def _parse_milestone_response(self, text: str, user_request: str) -> MilestonePlan:
         """Parse an LLM milestone plan response into a MilestonePlan."""
@@ -719,6 +987,9 @@ class TaskPlanner:
                 depends_on=m_data.get("depends_on", []),
                 deliverable_key=m_data.get("deliverable_key", ""),
             ))
+
+        if not milestones:
+            raise ValueError("Milestone plan did not include any milestones")
 
         return MilestonePlan(
             task_summary=data.get("task_summary", user_request),
@@ -826,8 +1097,35 @@ class TaskPlanner:
         task_summary: str = "",
         task_graph: Optional[TaskGraph] = None,
     ) -> bool:
-        """Milestone planning is now universal for all requests."""
-        return True
+        """Return whether this request needs high-effort milestone reasoning.
+
+        Single, explicit actions can still use a one-milestone executor plan,
+        but do not need the slower high-effort planning pass. Compound,
+        research, writing, communication, destructive, and unclear work keeps
+        full milestone reasoning.
+        """
+        task_graph = task_graph or self.intent_parser.extract_task_graph(user_request)
+        if self._is_compound_task_graph(task_graph) or self._should_bypass_template_shortcuts(user_request, task_graph):
+            return True
+
+        intent = self.intent_parser.parse(user_request)
+        if intent.ambiguous:
+            return True
+        if intent.action in {
+            IntentAction.CREATE,
+            IntentAction.DELETE,
+            IntentAction.COMMUNICATE,
+            IntentAction.EXECUTE,
+            IntentAction.SEARCH,
+        }:
+            return True
+
+        complex_markers = (
+            "research", "investigate", "analyze", "analyse", "compare",
+            "report", "brief", "document", "summarize", "summarise",
+        )
+        text = f" {user_request.lower()} {task_summary.lower()} "
+        return any(marker in text for marker in complex_markers)
 
     def _hard_safety_clarification_prompt(self, intent: UserIntent) -> Optional[str]:
         """Return a clarification prompt for destructive requests, if needed."""
@@ -888,6 +1186,8 @@ class TaskPlanner:
                         success_signal=f"{intent.target_value} is open or focused",
                         hint_tools=["open_app"],
                         deliverable_key="app_opened",
+                        direct_tool="open_app",
+                        direct_tool_args={"app_name": intent.target_value},
                     )
                 ],
                 final_response=f"Opened {intent.target_value}.",
@@ -909,6 +1209,8 @@ class TaskPlanner:
                         success_signal="Requested page is open",
                         hint_tools=["open_url"],
                         deliverable_key="opened_url",
+                        direct_tool="open_url",
+                        direct_tool_args={"url": target_url},
                     )
                 ],
                 final_response=f"Opened {target_url or 'the requested URL'}.",
@@ -917,7 +1219,7 @@ class TaskPlanner:
                 source="milestone_sync_fallback",
             )
 
-        if intent.action == IntentAction.READ and intent.target_type == TargetType.FILE and intent.target_value:
+        if intent.action == IntentAction.ANALYZE and intent.target_type == TargetType.FILE and intent.target_value:
             return MilestonePlan(
                 task_summary=f"Read {intent.target_value}",
                 milestones=[

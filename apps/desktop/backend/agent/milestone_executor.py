@@ -382,6 +382,7 @@ class MilestoneExecutor:
         self,
         prompt: str,
         ws_callback=None,
+        thinking_level: str = "MEDIUM",
     ) -> tuple[Optional[str], float]:
         """Stream LLM response and parse JSON decision as early as possible.
 
@@ -409,7 +410,7 @@ class MilestoneExecutor:
                     system_prompt=MILESTONE_EXECUTOR_SYSTEM,
                     tools=[],
                     temperature=0.15,
-                    thinking_level="MEDIUM",
+                    thinking_level=thinking_level,
                     enable_builtin_tools=False,
                 ):
                     if chunk.error:
@@ -456,7 +457,7 @@ class MilestoneExecutor:
                 system_prompt=MILESTONE_EXECUTOR_SYSTEM,
                 tools=[],
                 temperature=0.15,
-                thinking_level="MEDIUM",
+                thinking_level=thinking_level,
                 enable_builtin_tools=False,
             )
             elapsed = _time.time() - t0
@@ -477,6 +478,7 @@ class MilestoneExecutor:
         request_scope_tool_names: Optional[set[str]] = None,
         blocked_await_signatures: Optional[set[str]] = None,
         ws_callback=None,
+        thinking_level: str = "MEDIUM",
     ) -> tuple[bool, str]:
         """Execute a single milestone via LLM micro-loop.
 
@@ -609,7 +611,9 @@ class MilestoneExecutor:
             t_llm = _time.time()
             try:
                 response_text, llm_elapsed = await self._stream_llm_decision(
-                    prompt, ws_callback=ws_callback,
+                    prompt,
+                    ws_callback=ws_callback,
+                    thinking_level=thinking_level,
                 )
 
                 if not response_text:
