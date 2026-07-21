@@ -31,6 +31,9 @@ for raw in sys.stdin:
         send({"jsonrpc": "2.0", "id": request_id, "result": {"requiresOpenaiAuth": True, "account": {"type": "chatgpt", "email": "judge@example.com", "planType": "plus"}}})
     elif method == "account/login/start":
         login_type = params.get("type")
+        if login_type == "chatgpt" and ({"appBrand", "useHostedLoginSuccessPage"} & params.keys()):
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Hosted login handoff is not allowed"}})
+            continue
         if login_type == "chatgptDeviceCode":
             result = {"type": "chatgptDeviceCode", "loginId": "fake-login", "verificationUrl": "https://chatgpt.com/auth/device", "userCode": "FAKE-CODE"}
         else:
@@ -44,6 +47,9 @@ for raw in sys.stdin:
     elif method == "thread/start":
         send({"jsonrpc": "2.0", "id": request_id, "result": {"thread": {"id": "thread-fake"}}})
     elif method == "turn/start":
+        if params.get("outputSchema") is not None:
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "schema-only turn rejected"}})
+            continue
         turn = {"id": "turn-fake", "status": "inProgress", "items": []}
         send({"jsonrpc": "2.0", "id": request_id, "result": {"turn": turn}})
         notification("turn/started", {"threadId": "thread-fake", "turn": turn})

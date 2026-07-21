@@ -60,8 +60,40 @@ async def test_provider_streams_final_response_and_safe_usage():
         tools=[],
     )]
     assert any(chunk.text == "hello " for chunk in chunks)
-    assert chunks[-1].text == "hello world"
+    assert "".join(chunk.text or "" for chunk in chunks) == "hello world"
+    assert chunks[-1].text == "world"
     assert chunks[-1].usage == {"input": 3, "output": 2}
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_schema_only_turn_uses_prompt_json_for_codex_compatibility():
+    provider = CodexAppServerProvider()
+    provider.client = fake_client(provider._on_notification)
+    provider.auth.client = provider.client
+    result = await provider.generate(
+        messages=[{"role": "user", "parts": [{"text": "Return a plan."}]}],
+        system_prompt="Return JSON only.",
+        tools=[],
+        response_json_schema={"type": "object"},
+    )
+    assert result.error is None
+    assert result.text == "hello world"
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_turn_uses_prompt_contract_for_codex_compatibility():
+    provider = CodexAppServerProvider()
+    provider.client = fake_client(provider._on_notification)
+    provider.auth.client = provider.client
+    result = await provider.generate(
+        messages=[{"role": "user", "parts": [{"text": "Respond."}]}],
+        system_prompt="",
+        tools=[{"name": "send_response", "description": "Respond", "parameters": {"type": "object"}}],
+    )
+    assert result.error is None
+    assert result.text == "hello world"
     await provider.close()
 
 
