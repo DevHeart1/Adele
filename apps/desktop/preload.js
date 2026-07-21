@@ -86,7 +86,29 @@ contextBridge.exposeInMainWorld("overlayAPI", {
   setPresenceStatus: (state, detail) => {
     ipcRenderer.send("presence:update", { state, detail });
   },
+  onIslandReviewApproval: (handler) => {
+    const wrapped = (_, approvalId) => handler(String(approvalId || ""));
+    ipcRenderer.on("island:review-approval", wrapped);
+    return () => ipcRenderer.removeListener("island:review-approval", wrapped);
+  },
+  onIslandSubmitCommand: (handler) => {
+    const wrapped = (_, command) => handler(String(command || ""));
+    ipcRenderer.on("island:submit-command", wrapped);
+    return () => ipcRenderer.removeListener("island:submit-command", wrapped);
+  },
+  onIslandOpenSettings: (handler) => {
+    const wrapped = (_, section) => handler(String(section || ""));
+    ipcRenderer.on("settings:open-island", wrapped);
+    return () => ipcRenderer.removeListener("settings:open-island", wrapped);
+  },
+  publishIslandEvent: (event) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) return;
+    ipcRenderer.send("island:renderer-event", event);
+  },
+  applyIslandPreferences: (preferences) => ipcRenderer.invoke("island:apply-preferences", preferences),
+  previewIsland: () => ipcRenderer.invoke("island:preview"),
   restartBackend: () => ipcRenderer.invoke("backend:restart"),
+  getBackendWsUrl: () => ipcRenderer.invoke("backend:get-ws-url"),
   getDataDirPath: () => ipcRenderer.invoke("app:get-data-dir-path"),
 
   // ── Auto-Updater ──
